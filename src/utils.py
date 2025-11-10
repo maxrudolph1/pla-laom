@@ -47,6 +47,8 @@ class DCSInMemoryDataset(Dataset):
         with h5py.File(hdf5_path, "r") as df:
             self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
             self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
+            self.background_ids = [torch.tensor(df[traj]["background_id"][:], device=device) for traj in df.keys()]
+            self.policy_ids = [torch.tensor(df[traj]["policy_id"][:], device=device) for traj in df.keys()]
             self.img_hw = df.attrs["img_hw"]
             self.act_dim = self.actions[0][0].shape[-1]
 
@@ -84,19 +86,31 @@ class DCSInMemoryDataset(Dataset):
 
 
 class DCSLAOMInMemoryDataset(Dataset):
-    def __init__(self, hdf5_path, frame_stack=1, device="cpu", max_offset=1, custom_dataset=True):
+    def __init__(self, hdf5_path, frame_stack=1, device="cpu", max_offset=1, custom_dataset=True, normalize=True):
         with h5py.File(hdf5_path, "r") as df:
-            # self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
-            # self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
-            # self.states = [torch.tensor(df[traj]["states"][:], device=device) for traj in df.keys()]
-            unique_episodes = np.unique(df['episode_index'][:])
-            episode_index = df['episode_index'][:]
-            self.observations = [torch.tensor(df['frames'][episode_index == ep], device=device).float() for ep in unique_episodes]
-            self.actions = [torch.tensor(df['action'][episode_index == ep], device=device).float() for ep in unique_episodes]
-            self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float() for ep in unique_episodes]
-            self.img_hw = 84 #[84, 84] #df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
+            if not custom_dataset:
+                self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
+                self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
+                self.states = [torch.tensor(df[traj]["states"][:], device=device) for traj in df.keys()]
+                self.img_hw = df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
+            else:
+                unique_episodes = np.unique(df['episode_index'][:])
+                episode_index = df['episode_index'][:]
+                self.observations = [torch.tensor(df['frames'][episode_index == ep], device=device).float() for ep in unique_episodes]
+                self.actions = [torch.tensor(df['action'][episode_index == ep], device=device).float() for ep in unique_episodes]
+                self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float() for ep in unique_episodes]
+                self.img_hw = 84 #[84, 84] #df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
             self.act_dim = self.actions[0][0].shape[-1]
             self.state_dim = self.states[0][0].shape[-1]
+        
+        if normalize:
+            self.state_mean = torch.concatenate(self.states).mean(dim=0)
+            self.state_std = torch.concatenate(self.states).std(dim=0)
+            self.states = [(state - self.state_mean) / self.state_std for state in self.states]
+
+            self.action_mean = torch.concatenate(self.actions).mean(dim=0)
+            self.action_std = torch.concatenate(self.actions).std(dim=0)
+            self.actions = [(action - self.action_mean) / self.action_std for action in self.actions]
 
         self.frame_stack = frame_stack
         self.traj_len = self.observations[0].shape[0]

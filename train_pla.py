@@ -60,10 +60,12 @@ class LAOMConfig:
     target_tau: float = 0.01
     target_update_every: int = 1
     frame_stack: int = 3
-    # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5" #"data/example-data.hdf5"
-    data_path: str = "/home1/09312/rudolph/work/datasets/cheetah-run-vanilla-64px-5k.hdf5"
-    custom_dataset: bool = False
+    # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5"
     normalize: bool = True
+    custom_dataset: bool = True
+    data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/50_episodes/50_episodes.hdf5" 
+
+
 
 @dataclass
 class BCConfig:
@@ -116,7 +118,7 @@ class Config:
         self.name = f"{self.name}-{str(uuid.uuid4())}"
 
 
-def train_laom(config: LAOMConfig):
+def train_pla(config: LAOMConfig):
     dataset = DCSLAOMInMemoryDataset(
         config.data_path, max_offset=config.future_obs_offset, frame_stack=config.frame_stack, device=DEVICE, custom_dataset=config.custom_dataset, normalize=config.normalize
     )
@@ -167,6 +169,10 @@ def train_laom(config: LAOMConfig):
     print("Final encoder shape:", math.prod(lapo.final_encoder_shape))
     state_act_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.act_dim).to(DEVICE)
     state_act_probe_optim = torch.optim.Adam(state_act_linear_probe.parameters(), lr=config.learning_rate)
+
+    background_discriminator = nn.Linear(config.latent_action_dim, len(dataset.background_ids))
+    background_discriminator_optim = torch.optim.Adam(background_discriminator.parameters(), lr=config.learning_rate)
+
 
     # scheduler setup
     total_updates = len(dataloader) * config.num_epochs
@@ -523,7 +529,7 @@ def train(config: Config):
     )
     set_seed(config.seed)
     # stage 1: pretraining lapo on unlabeled dataset
-    lapo = train_laom(config=config.lapo)
+    lapo = train_pla(config=config.lapo)
     # stage 2: pretraining bc on latent actions
     actor = train_bc(lam=lapo, config=config.bc)
     # stage 3: finetune on labeles ground-truth actions

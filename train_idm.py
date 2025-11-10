@@ -52,7 +52,7 @@ class IDMConfig:
     encoder_deep: bool = True
     encoder_dropout: float = 0.0
     frame_stack: int = 3
-    data_path: str = "data/test.hdf5"
+    data_path: str = "data/example-data.hdf5"
     eval_data_path: Optional[str] = None
 
 
@@ -69,7 +69,7 @@ class BCConfig:
     dropout: float = 0.0
     use_aug: bool = True
     frame_stack: int = 3
-    data_path: str = "data/test.hdf5"
+    data_path: str = "data/example-data.hdf5"
     dcs_backgrounds_path: str = "DAVIS/JPEGImages/480p"
     dcs_backgrounds_split: str = "train"
     eval_episodes: int = 10

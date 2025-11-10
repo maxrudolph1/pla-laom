@@ -41,7 +41,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 class LAOMConfig:
     num_epochs: int = 150
     batch_size: int = 2048
-    use_aug: bool = True
+    use_aug: bool = False   
     future_obs_offset: int = 1
     learning_rate: float = 3e-4
     weight_decay: float = 0.0
@@ -60,7 +60,7 @@ class LAOMConfig:
     target_tau: float = 0.01
     target_update_every: int = 1
     frame_stack: int = 3
-    data_path: str = "data/test.hdf5"
+    data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5" #"data/example-data.hdf5"
 
 
 @dataclass
@@ -74,9 +74,9 @@ class BCConfig:
     encoder_num_res_blocks: int = 2
     encoder_deep: bool = False
     dropout: float = 0.0
-    use_aug: bool = True
+    use_aug: bool = False
     frame_stack: int = 3
-    data_path: str = "data/test.hdf5"
+    data_path: str = "data/example-data.hdf5"
     dcs_backgrounds_path: str = "DAVIS/JPEGImages/480p"
     dcs_backgrounds_split: str = "train"
     eval_episodes: int = 10
@@ -91,7 +91,7 @@ class DecoderConfig:
     weight_decay: float = 0.0
     warmup_epochs: int = 5
     hidden_dim: int = 128
-    use_aug: bool = True
+    use_aug: bool = False
     data_path: str = "data/test.hdf5"
     dcs_backgrounds_path: str = "DAVIS/JPEGImages/480p"
     dcs_backgrounds_split: str = "train"
@@ -153,7 +153,8 @@ def train_laom(config: LAOMConfig):
         lr=config.learning_rate,
         fused=True,
     )
-    augmenter = Augmenter(dataset.img_hw)
+    if config.use_aug:
+        augmenter = Augmenter(dataset.img_hw)
 
     state_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.state_dim).to(DEVICE)
     state_probe_optim = torch.optim.Adam(state_probe.parameters(), lr=config.learning_rate)

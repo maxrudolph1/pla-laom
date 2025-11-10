@@ -84,12 +84,17 @@ class DCSInMemoryDataset(Dataset):
 
 
 class DCSLAOMInMemoryDataset(Dataset):
-    def __init__(self, hdf5_path, frame_stack=1, device="cpu", max_offset=1):
+    def __init__(self, hdf5_path, frame_stack=1, device="cpu", max_offset=1, custom_dataset=True):
         with h5py.File(hdf5_path, "r") as df:
-            self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
-            self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
-            self.states = [torch.tensor(df[traj]["states"][:], device=device) for traj in df.keys()]
-            self.img_hw = df.attrs["img_hw"]
+            # self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
+            # self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
+            # self.states = [torch.tensor(df[traj]["states"][:], device=device) for traj in df.keys()]
+            unique_episodes = np.unique(df['episode_index'][:])
+            episode_index = df['episode_index'][:]
+            self.observations = [torch.tensor(df['frames'][episode_index == ep], device=device).float() for ep in unique_episodes]
+            self.actions = [torch.tensor(df['action'][episode_index == ep], device=device).float() for ep in unique_episodes]
+            self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float() for ep in unique_episodes]
+            self.img_hw = 84 #[84, 84] #df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
             self.act_dim = self.actions[0][0].shape[-1]
             self.state_dim = self.states[0][0].shape[-1]
 

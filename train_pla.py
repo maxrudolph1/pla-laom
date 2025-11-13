@@ -63,8 +63,9 @@ class LAOMConfig:
     # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5"
     normalize: bool = True
     custom_dataset: bool = True
-    data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/50_episodes/50_episodes.hdf5" 
-
+    # data_path: str = "/home1/09312/rudolph/work/datasets/cheetah-run-vanilla.hdf5"
+    data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/test/policy_rollouts/undistracted/cheetah/run_forward/sac/intermediate/easy/84x84/action_repeats_2/train/5000_episodes.hdf5'
+    # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/50_episodes/50_episodes.hdf5" 
 
 
 @dataclass
@@ -170,8 +171,9 @@ def train_pla(config: LAOMConfig):
     state_act_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.act_dim).to(DEVICE)
     state_act_probe_optim = torch.optim.Adam(state_act_linear_probe.parameters(), lr=config.learning_rate)
 
-    background_discriminator = nn.Linear(config.latent_action_dim, len(dataset.background_ids))
-    background_discriminator_optim = torch.optim.Adam(background_discriminator.parameters(), lr=config.learning_rate)
+    # if config.custom_dataset:
+    #     background_discriminator = nn.Linear(config.latent_action_dim, len(dataset.background_ids))
+    #     background_discriminator_optim = torch.optim.Adam(background_discriminator.parameters(), lr=config.learning_rate)
 
 
     # scheduler setup

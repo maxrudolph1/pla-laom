@@ -43,15 +43,13 @@ def soft_update(target, source, tau=1e-3):
 
 
 class DCSInMemoryDataset(Dataset):
-    def __init__(self, hdf5_path, frame_stack=1, device="cpu"):
+    def __init__(self, hdf5_path, frame_stack=1, device="cpu", custom_dataset=False, normalize=True):
         with h5py.File(hdf5_path, "r") as df:
             self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
             self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
-            self.background_ids = [torch.tensor(df[traj]["background_id"][:], device=device) for traj in df.keys()]
-            self.policy_ids = [torch.tensor(df[traj]["policy_id"][:], device=device) for traj in df.keys()]
             self.img_hw = df.attrs["img_hw"]
             self.act_dim = self.actions[0][0].shape[-1]
-
+    
         self.frame_stack = frame_stack
         self.traj_len = self.observations[0].shape[0]
 
@@ -96,9 +94,9 @@ class DCSLAOMInMemoryDataset(Dataset):
             else:
                 unique_episodes = np.unique(df['episode_index'][:])
                 episode_index = df['episode_index'][:]
-                self.observations = [torch.tensor(df['frames'][episode_index == ep], device=device).float() for ep in unique_episodes]
-                self.actions = [torch.tensor(df['action'][episode_index == ep], device=device).float() for ep in unique_episodes]
-                self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float() for ep in unique_episodes]
+                self.observations = [torch.tensor(df['frames'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
+                self.actions = [torch.tensor(df['action'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
+                self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
                 self.img_hw = 84 #[84, 84] #df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
             self.act_dim = self.actions[0][0].shape[-1]
             self.state_dim = self.states[0][0].shape[-1]

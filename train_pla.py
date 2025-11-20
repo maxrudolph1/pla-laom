@@ -66,8 +66,8 @@ class LAOMConfig:
     # data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/pm_clean/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5'
     # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/50_episodes/50_episodes.hdf5" 
     # data_path: str = 'data/pm_tanh_actions/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
-    data_path: str = 'data/large_ball_large_dt/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
-
+    # data_path: str = 'data/large_ball_large_dt/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
+    data_path: str = 'data/cheetah_random_actions/policy_rollouts/undistracted/cheetah/run_forward/sac/expert/easy/84x84/action_repeats_2/train/1000_episodes/1000_episodes.hdf5'
 @dataclass
 class BCConfig:
     num_epochs: int = 1
@@ -164,16 +164,18 @@ def train_pla(config: LAOMConfig):
     state_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.state_dim).to(DEVICE)
     state_probe_optim = torch.optim.Adam(state_probe.parameters(), lr=config.learning_rate)
 
+    position_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
+    position_probe_optim = torch.optim.Adam(position_probe.parameters(), lr=config.learning_rate)
+
+    velocity_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
+    velocity_probe_optim = torch.optim.Adam(velocity_probe.parameters(), lr=config.learning_rate)
+
     act_linear_probe = nn.Linear(config.latent_action_dim, dataset.act_dim).to(DEVICE)
     act_probe_optim = torch.optim.Adam(act_linear_probe.parameters(), lr=config.learning_rate)
 
     print("Final encoder shape:", math.prod(lapo.final_encoder_shape))
     state_act_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.act_dim).to(DEVICE)
     state_act_probe_optim = torch.optim.Adam(state_act_linear_probe.parameters(), lr=config.learning_rate)
-
-    # if config.custom_dataset:
-    #     background_discriminator = nn.Linear(config.latent_action_dim, len(dataset.background_ids))
-    #     background_discriminator_optim = torch.optim.Adam(background_discriminator.parameters(), lr=config.learning_rate)
 
 
     # scheduler setup
@@ -226,6 +228,21 @@ def train_pla(config: LAOMConfig):
             if i % config.target_update_every == 0:
                 soft_update(target_lapo, lapo, tau=config.target_tau)
 
+            # with torch.autocast(DEVICE, dtype=torch.bfloat16):
+            #     pred_position = position_probe(obs_hidden.detach())
+            #     position_probe_loss = F.mse_loss(pred_position, states[:, :2])
+                
+            #     pred_velocity = velocity_probe(obs_hidden.detach())
+            #     velocity_probe_loss = F.mse_loss(pred_velocity, states[:, 2:])
+
+            # position_probe_optim.zero_grad(set_to_none=True)
+            # position_probe_loss.backward()
+            # position_probe_optim.step()
+
+            # velocity_probe_optim.zero_grad(set_to_none=True)
+            # velocity_probe_loss.backward()
+            # velocity_probe_optim.step()
+
             # update probes
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 pred_states = state_probe(obs_hidden.detach())
@@ -240,8 +257,8 @@ def train_pla(config: LAOMConfig):
                 act_probe_loss = F.mse_loss(pred_action, actions)
 
             act_probe_optim.zero_grad(set_to_none=True)
-            act_probe_loss.backward()
-            act_probe_optim.step()
+            # act_probe_loss.backward()
+            # act_probe_optim.step()
 
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 state_pred_action = state_act_linear_probe(obs_hidden.detach())
@@ -250,23 +267,25 @@ def train_pla(config: LAOMConfig):
             state_act_probe_optim.zero_grad(set_to_none=True)
             state_act_probe_loss.backward()
             state_act_probe_optim.step()
-
-            wandb.log(
-                {
-                    "lapo/mse_loss": loss.item(),
-                    "lapo/state_probe_mse_loss": state_probe_loss.item(),
-                    "lapo/action_probe_mse_loss": act_probe_loss.item(),
-                    "lapo/state_action_probe_mse_loss": state_act_probe_loss.item(),
-                    "lapo/throughput": total_tokens / (time.time() - start_time),
-                    "lapo/learning_rate": scheduler.get_last_lr()[0],
-                    "lapo/grad_norm": get_grad_norm(lapo).item(),
-                    "lapo/target_obs_norm": torch.norm(next_obs_target, p=2, dim=-1).mean().item(),
-                    "lapo/online_obs_norm": torch.norm(latent_next_obs, p=2, dim=-1).mean().item(),
-                    "lapo/latent_act_norm": torch.norm(latent_action, p=2, dim=-1).mean().item(),
-                    "lapo/epoch": epoch,
-                    "lapo/total_steps": total_iterations,
-                }
-            )
+            if total_iterations % 100 == 0:
+                wandb.log(
+                    {
+                        "lapo/mse_loss": loss.item(),
+                        "lapo/state_probe_mse_loss": state_probe_loss.item(),
+                        "lapo/action_probe_mse_loss": act_probe_loss.item(),
+                        # "lapo/position_probe_mse_loss": position_probe_loss.item(),
+                        # "lapo/velocity_probe_mse_loss": velocity_probe_loss.item(),
+                        "lapo/state_action_probe_mse_loss": state_act_probe_loss.item(),
+                        "lapo/throughput": total_tokens / (time.time() - start_time),
+                        "lapo/learning_rate": scheduler.get_last_lr()[0],
+                        "lapo/grad_norm": get_grad_norm(lapo).item(),
+                        "lapo/target_obs_norm": torch.norm(next_obs_target, p=2, dim=-1).mean().item(),
+                        "lapo/online_obs_norm": torch.norm(latent_next_obs, p=2, dim=-1).mean().item(),
+                        "lapo/latent_act_norm": torch.norm(latent_action, p=2, dim=-1).mean().item(),
+                        "lapo/epoch": epoch,
+                        "lapo/total_steps": total_iterations,
+                    }
+                )
 
     return lapo
 

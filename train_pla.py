@@ -60,13 +60,13 @@ class LAOMConfig:
     target_tau: float = 0.01
     target_update_every: int = 1
     frame_stack: int = 3
-    # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5"
     normalize: bool = True
     custom_dataset: bool = True
-    # data_path: str = "/home1/09312/rudolph/work/datasets/cheetah-run-vanilla.hdf5"
-    data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/test/policy_rollouts/undistracted/cheetah/run_forward/sac/intermediate/easy/84x84/action_repeats_2/train/5000_episodes.hdf5'
+    # data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/test/policy_rollouts/undistracted/cheetah/run_forward/sac/intermediate/easy/84x84/action_repeats_2/train/1000_episodes.hdf5'
+    # data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/pm_clean/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5'
     # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/50_episodes/50_episodes.hdf5" 
-
+    # data_path: str = 'data/pm_tanh_actions/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
+    data_path: str = 'data/large_ball_large_dt/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
 
 @dataclass
 class BCConfig:
@@ -532,13 +532,13 @@ def train(config: Config):
     set_seed(config.seed)
     # stage 1: pretraining lapo on unlabeled dataset
     lapo = train_pla(config=config.lapo)
-    # stage 2: pretraining bc on latent actions
-    actor = train_bc(lam=lapo, config=config.bc)
-    # stage 3: finetune on labeles ground-truth actions
-    action_decoder = train_act_decoder(actor=actor, config=config.decoder, bc_config=config.bc)
+    # # stage 2: pretraining bc on latent actions
+    # actor = train_bc(lam=lapo, config=config.bc)
+    # # stage 3: finetune on labeles ground-truth actions
+    # action_decoder = train_act_decoder(actor=actor, config=config.decoder, bc_config=config.bc)
 
     run.finish()
-    return lapo, actor, action_decoder
+    return lapo #, actor, action_decoder
 
 
 if __name__ == "__main__":

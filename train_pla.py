@@ -61,13 +61,14 @@ class LAOMConfig:
     target_update_every: int = 1
     frame_stack: int = 3
     normalize: bool = True
-    custom_dataset: bool = True
+    custom_dataset: bool = False
     # data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/test/policy_rollouts/undistracted/cheetah/run_forward/sac/intermediate/easy/84x84/action_repeats_2/train/1000_episodes.hdf5'
     # data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/pm_clean/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5'
     # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/50_episodes/50_episodes.hdf5" 
     # data_path: str = 'data/pm_tanh_actions/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
     # data_path: str = 'data/large_ball_large_dt/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
-    data_path: str = 'data/cheetah_random_actions/policy_rollouts/undistracted/cheetah/run_forward/sac/expert/easy/84x84/action_repeats_2/train/1000_episodes/1000_episodes.hdf5'
+    # data_path: str = 'data/cheetah_random_actions/policy_rollouts/undistracted/cheetah/run_forward/sac/expert/easy/84x84/action_repeats_2/train/1000_episodes/1000_episodes.hdf5'
+    data_path = '/home1/09312/rudolph/work/datasets/cheetah-run-vanilla.hdf5'
 @dataclass
 class BCConfig:
     num_epochs: int = 1
@@ -170,13 +171,11 @@ def train_pla(config: LAOMConfig):
     velocity_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
     velocity_probe_optim = torch.optim.Adam(velocity_probe.parameters(), lr=config.learning_rate)
 
-    act_linear_probe = nn.Linear(config.latent_action_dim, dataset.act_dim).to(DEVICE)
-    act_probe_optim = torch.optim.Adam(act_linear_probe.parameters(), lr=config.learning_rate)
+    pos_diff_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
+    pos_diff_probe_optim = torch.optim.Adam(pos_diff_linear_probe.parameters(), lr=config.learning_rate)
 
-    print("Final encoder shape:", math.prod(lapo.final_encoder_shape))
-    state_act_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.act_dim).to(DEVICE)
-    state_act_probe_optim = torch.optim.Adam(state_act_linear_probe.parameters(), lr=config.learning_rate)
-
+    vel_diff_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
+    vel_diff_probe_optim = torch.optim.Adam(vel_diff_linear_probe.parameters(), lr=config.learning_rate)
 
     # scheduler setup
     total_updates = len(dataloader) * config.num_epochs
@@ -192,11 +191,15 @@ def train_pla(config: LAOMConfig):
             total_tokens += config.batch_size
             total_iterations += 1
 
-            obs, next_obs, future_obs, actions, states, offset = [b.to(DEVICE) for b in batch]
+            obs, next_obs, future_obs, actions, states, next_states, offset = [b.to(DEVICE) for b in batch]
 
             obs = normalize_img(obs.permute((0, 3, 1, 2)))
             next_obs = normalize_img(next_obs.permute((0, 3, 1, 2)))
             future_obs = normalize_img(future_obs.permute((0, 3, 1, 2)))
+            pos = states[:, :2]
+            vel = states[:, 2:]
+            next_pos = next_states[:, :2]
+            next_vel = next_states[:, 2:]
 
             if config.use_aug:
                 obs_aug = augmenter(obs)
@@ -228,54 +231,66 @@ def train_pla(config: LAOMConfig):
             if i % config.target_update_every == 0:
                 soft_update(target_lapo, lapo, tau=config.target_tau)
 
-            # with torch.autocast(DEVICE, dtype=torch.bfloat16):
-            #     pred_position = position_probe(obs_hidden.detach())
-            #     position_probe_loss = F.mse_loss(pred_position, states[:, :2])
-                
-            #     pred_velocity = velocity_probe(obs_hidden.detach())
-            #     velocity_probe_loss = F.mse_loss(pred_velocity, states[:, 2:])
-
-            # position_probe_optim.zero_grad(set_to_none=True)
-            # position_probe_loss.backward()
-            # position_probe_optim.step()
-
-            # velocity_probe_optim.zero_grad(set_to_none=True)
-            # velocity_probe_loss.backward()
-            # velocity_probe_optim.step()
-
-            # update probes
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
+                pred_position = position_probe(obs_hidden.detach())
+                position_probe_loss = F.mse_loss(pred_position, states[:, :2])
+                
+                pred_velocity = velocity_probe(obs_hidden.detach())
+                velocity_probe_loss = F.mse_loss(pred_velocity, states[:, 2:])
+
                 pred_states = state_probe(obs_hidden.detach())
                 state_probe_loss = F.mse_loss(pred_states, states)
+
+                pred_pos_diff = pos_diff_linear_probe(latent_action.detach())
+                pos_diff_probe_loss = F.mse_loss(pred_pos_diff, next_pos - pos)
+
+                pred_vel_diff = vel_diff_linear_probe(latent_action.detach())
+                vel_diff_probe_loss = F.mse_loss(pred_vel_diff, next_vel - vel)
+
+            position_probe_optim.zero_grad(set_to_none=True)
+            position_probe_loss.backward()
+            position_probe_optim.step()
+
+            velocity_probe_optim.zero_grad(set_to_none=True)
+            velocity_probe_loss.backward()
+            velocity_probe_optim.step()
 
             state_probe_optim.zero_grad(set_to_none=True)
             state_probe_loss.backward()
             state_probe_optim.step()
 
-            with torch.autocast(DEVICE, dtype=torch.bfloat16):
-                pred_action = act_linear_probe(latent_action.detach())
-                act_probe_loss = F.mse_loss(pred_action, actions)
+            pos_diff_probe_optim.zero_grad(set_to_none=True)
+            pos_diff_probe_loss.backward()
+            pos_diff_probe_optim.step()
 
-            act_probe_optim.zero_grad(set_to_none=True)
+            vel_diff_probe_optim.zero_grad(set_to_none=True)
+            vel_diff_probe_loss.backward()
+            vel_diff_probe_optim.step()
+
+
+
+            # with torch.autocast(DEVICE, dtype=torch.bfloat16):
+            #     pred_action = act_linear_probe(latent_action.detach())
+            #     act_probe_loss = F.mse_loss(pred_action, actions)
+
+            # act_probe_optim.zero_grad(set_to_none=True)
             # act_probe_loss.backward()
             # act_probe_optim.step()
 
-            with torch.autocast(DEVICE, dtype=torch.bfloat16):
-                state_pred_action = state_act_linear_probe(obs_hidden.detach())
-                state_act_probe_loss = F.mse_loss(state_pred_action, actions)
+            # with torch.autocast(DEVICE, dtype=torch.bfloat16):
+            #     state_pred_action = state_act_linear_probe(obs_hidden.detach())
+            #     state_act_probe_loss = F.mse_loss(state_pred_action, actions)
 
-            state_act_probe_optim.zero_grad(set_to_none=True)
-            state_act_probe_loss.backward()
-            state_act_probe_optim.step()
+            # state_act_probe_optim.zero_grad(set_to_none=True)
+            # state_act_probe_loss.backward()
+            # state_act_probe_optim.step()
             if total_iterations % 100 == 0:
                 wandb.log(
                     {
                         "lapo/mse_loss": loss.item(),
                         "lapo/state_probe_mse_loss": state_probe_loss.item(),
-                        "lapo/action_probe_mse_loss": act_probe_loss.item(),
-                        # "lapo/position_probe_mse_loss": position_probe_loss.item(),
-                        # "lapo/velocity_probe_mse_loss": velocity_probe_loss.item(),
-                        "lapo/state_action_probe_mse_loss": state_act_probe_loss.item(),
+                        "lapo/pos_diff_probe_mse_loss": pos_diff_probe_loss.item(),
+                        "lapo/vel_diff_probe_mse_loss": vel_diff_probe_loss.item(),
                         "lapo/throughput": total_tokens / (time.time() - start_time),
                         "lapo/learning_rate": scheduler.get_last_lr()[0],
                         "lapo/grad_norm": get_grad_norm(lapo).item(),

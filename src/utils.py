@@ -139,13 +139,15 @@ class DCSLAOMInMemoryDataset(Dataset):
         traj_idx, transition_idx = divmod(idx, self.traj_len - self.max_offset)
         action = self.actions[traj_idx][transition_idx]
         state = self.states[traj_idx][transition_idx]
+        next_state = self.states[traj_idx][transition_idx + 1]
 
         obs = self.__get_padded_obs(traj_idx, transition_idx)
         next_obs = self.__get_padded_obs(traj_idx, transition_idx + 1)
         offset = random.randint(1, self.max_offset)
         future_obs = self.__get_padded_obs(traj_idx, transition_idx + offset)
 
-        return obs, next_obs, future_obs, action, state, (offset - 1)
+
+        return obs, next_obs, future_obs, action, state, next_state,(offset - 1)
 
 
 class DCSLAOMTrueActionsDataset(IterableDataset):
@@ -191,8 +193,9 @@ class DCSLAOMTrueActionsDataset(IterableDataset):
 
             action = self.actions[traj_idx][transition_idx]
             state = self.states[traj_idx][transition_idx]
+            next_state = self.states[traj_idx][transition_idx + 1]
 
-            yield obs, next_obs, future_obs, action, state, (offset - 1)
+            yield obs, next_obs, future_obs, action, state, next_state, (offset - 1)
 
 
 def normalize_img(img):

@@ -17,6 +17,42 @@ ignore = [
 [tool.ruff.format]
 skip-magic-trailing-comma = false
 
+[project]
+name = "pla-laom"
+version = "0.1.0"
+dependencies = [
+    "torchvision",
+    "torchinfo",
+    "torcheval",
+    "opencv-python",
+    "mujoco==3.2.0",
+    "numpy",
+    "dm_control==1.0.3",
+    "gymnasium",
+    "shimmy==2.0.0",
+    "imageio",
+    "imageio-ffmpeg",
+    "Pillow",
+    "pyrallis==0.3.1",
+    "h5py",
+    "tqdm",
+    "stable_baselines3",
+    "sb3-contrib==2.4.0",
+    "vector-quantize-pytorch==1.22.16",
+    "wandb"
+]
+
 [tool.ruff.lint.isort]
 # see https://github.com/astral-sh/ruff/issues/8571
 known-third-party = ["wandb"]
+
+[project.optional-dependencies]
+dev = [
+    "ruff"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+

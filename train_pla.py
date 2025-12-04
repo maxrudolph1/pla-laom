@@ -1,6 +1,7 @@
 import math
 import time
 import uuid
+import warnings
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -15,6 +16,9 @@ import wandb
 from pyrallis import field
 from torch.utils.data import DataLoader
 from tqdm import trange
+
+# Suppress datetime.utcnow() deprecation warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from src.augmentations import Augmenter
 from src.nn import LAOM, ActionDecoder, Actor
@@ -62,13 +66,12 @@ class LAOMConfig:
     frame_stack: int = 3
     normalize: bool = True
     custom_dataset: bool = False
-    # data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/test/policy_rollouts/undistracted/cheetah/run_forward/sac/intermediate/easy/84x84/action_repeats_2/train/1000_episodes.hdf5'
-    # data_path: str = '/home1/09312/rudolph/documents/visual_dm_control/data/pm_clean/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/5000_episodes/5000_episodes.hdf5'
-    # data_path: str = "/home1/09312/rudolph/documents/pla/data/aa/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/50_episodes/50_episodes.hdf5" 
-    # data_path: str = 'data/pm_tanh_actions/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
-    # data_path: str = 'data/large_ball_large_dt/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5'
-    # data_path: str = 'data/cheetah_random_actions/policy_rollouts/undistracted/cheetah/run_forward/sac/expert/easy/84x84/action_repeats_2/train/1000_episodes/1000_episodes.hdf5'
-    data_path = '/home1/09312/rudolph/work/datasets/cheetah-run-vanilla.hdf5'
+    has_policy_labels: bool = False
+    has_distractor_labels: bool = False
+    state_difference_probe: bool = False
+    data_path: str = ''
+    
+
 @dataclass
 class BCConfig:
     num_epochs: int = 1
@@ -165,17 +168,8 @@ def train_pla(config: LAOMConfig):
     state_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.state_dim).to(DEVICE)
     state_probe_optim = torch.optim.Adam(state_probe.parameters(), lr=config.learning_rate)
 
-    position_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
-    position_probe_optim = torch.optim.Adam(position_probe.parameters(), lr=config.learning_rate)
-
-    velocity_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
-    velocity_probe_optim = torch.optim.Adam(velocity_probe.parameters(), lr=config.learning_rate)
-
-    pos_diff_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
-    pos_diff_probe_optim = torch.optim.Adam(pos_diff_linear_probe.parameters(), lr=config.learning_rate)
-
-    vel_diff_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), 2).to(DEVICE)
-    vel_diff_probe_optim = torch.optim.Adam(vel_diff_linear_probe.parameters(), lr=config.learning_rate)
+    state_difference_probe = nn.Linear(lapo.latent_act_dim, dataset.state_dim).to(DEVICE)
+    state_difference_probe_optim = torch.optim.Adam(state_difference_probe.parameters(), lr=config.learning_rate)
 
     # scheduler setup
     total_updates = len(dataloader) * config.num_epochs
@@ -191,15 +185,13 @@ def train_pla(config: LAOMConfig):
             total_tokens += config.batch_size
             total_iterations += 1
 
-            obs, next_obs, future_obs, actions, states, next_states, offset = [b.to(DEVICE) for b in batch]
+            obs, next_obs, future_obs, actions, states, next_states, state_diffs, offset = [b.to(DEVICE) for b in batch]
 
             obs = normalize_img(obs.permute((0, 3, 1, 2)))
             next_obs = normalize_img(next_obs.permute((0, 3, 1, 2)))
             future_obs = normalize_img(future_obs.permute((0, 3, 1, 2)))
-            pos = states[:, :2]
-            vel = states[:, 2:]
-            next_pos = next_states[:, :2]
-            next_vel = next_states[:, 2:]
+            pos_diff = state_diffs[:, :2]
+            vel_diff = state_diffs[:, 2:]
 
             if config.use_aug:
                 obs_aug = augmenter(obs)
@@ -242,10 +234,10 @@ def train_pla(config: LAOMConfig):
                 state_probe_loss = F.mse_loss(pred_states, states)
 
                 pred_pos_diff = pos_diff_linear_probe(latent_action.detach())
-                pos_diff_probe_loss = F.mse_loss(pred_pos_diff, next_pos - pos)
+                pos_diff_probe_loss = F.mse_loss(pred_pos_diff, pos_diff)
 
                 pred_vel_diff = vel_diff_linear_probe(latent_action.detach())
-                vel_diff_probe_loss = F.mse_loss(pred_vel_diff, next_vel - vel)
+                vel_diff_probe_loss = F.mse_loss(pred_vel_diff, vel_diff)
 
             position_probe_optim.zero_grad(set_to_none=True)
             position_probe_loss.backward()

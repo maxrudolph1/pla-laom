@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from shimmy import DmControlCompatibilityV0
+from tensordict import TensorDict
 from torch.utils.data import Dataset, IterableDataset
 
 from .dcs import suite
@@ -80,7 +81,11 @@ class DCSInMemoryDataset(Dataset):
         next_obs = self.__get_padded_obs(traj_idx, transition_idx + 1)
         action = self.actions[traj_idx][transition_idx]
 
-        return obs, next_obs, action
+        return TensorDict({
+            "obs": obs,
+            "next_obs": next_obs,
+            "action": action,
+        }, batch_size=[])
 
 
 class DCSLAOMInMemoryDataset(Dataset):
@@ -90,6 +95,7 @@ class DCSLAOMInMemoryDataset(Dataset):
                 self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
                 self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
                 self.states = [torch.tensor(df[traj]["states"][:], device=device) for traj in df.keys()]
+                self.state_diffs = [torch.diff(state, dim=-2) for state in self.states]
                 self.img_hw = df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
             else:
                 unique_episodes = np.unique(df['episode_index'][:])
@@ -97,6 +103,7 @@ class DCSLAOMInMemoryDataset(Dataset):
                 self.observations = [torch.tensor(df['frames'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
                 self.actions = [torch.tensor(df['action'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
                 self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
+                self.state_diffs = [torch.diff(state, dim=-2) for state in self.states]
                 self.img_hw = 84 #[84, 84] #df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
             self.act_dim = self.actions[0][0].shape[-1]
             self.state_dim = self.states[0][0].shape[-1]
@@ -109,6 +116,11 @@ class DCSLAOMInMemoryDataset(Dataset):
             self.action_mean = torch.concatenate(self.actions).mean(dim=0)
             self.action_std = torch.concatenate(self.actions).std(dim=0)
             self.actions = [(action - self.action_mean) / self.action_std for action in self.actions]
+
+            self.state_diff_mean = torch.diff(torch.stack(self.states), dim=-2).view(-1, self.state_dim).mean(dim=0)
+            self.state_diff_std = torch.diff(torch.stack(self.states), dim=-2).view(-1, self.state_dim).std(dim=0)
+            self.state_diffs = [(state_diff - self.state_diff_mean) / self.state_diff_std for state_diff in self.state_diffs]
+
 
         self.frame_stack = frame_stack
         self.traj_len = self.observations[0].shape[0]
@@ -140,6 +152,7 @@ class DCSLAOMInMemoryDataset(Dataset):
         action = self.actions[traj_idx][transition_idx]
         state = self.states[traj_idx][transition_idx]
         next_state = self.states[traj_idx][transition_idx + 1]
+        state_diff = self.state_diffs[traj_idx][transition_idx]
 
         obs = self.__get_padded_obs(traj_idx, transition_idx)
         next_obs = self.__get_padded_obs(traj_idx, transition_idx + 1)
@@ -147,7 +160,7 @@ class DCSLAOMInMemoryDataset(Dataset):
         future_obs = self.__get_padded_obs(traj_idx, transition_idx + offset)
 
 
-        return obs, next_obs, future_obs, action, state, next_state,(offset - 1)
+        return obs, next_obs, future_obs, action, state, next_state, state_diff, (offset - 1)
 
 
 class DCSLAOMTrueActionsDataset(IterableDataset):

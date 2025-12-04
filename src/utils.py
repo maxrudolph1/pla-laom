@@ -159,8 +159,16 @@ class DCSLAOMInMemoryDataset(Dataset):
         offset = random.randint(1, self.max_offset)
         future_obs = self.__get_padded_obs(traj_idx, transition_idx + offset)
 
-
-        return obs, next_obs, future_obs, action, state, next_state, state_diff, (offset - 1)
+        return TensorDict({
+            "obs": obs,
+            "next_obs": next_obs,
+            "future_obs": future_obs,
+            "action": action,
+            "state": state,
+            "next_state": next_state,
+            "state_diff": state_diff,
+            "offset": torch.tensor(offset - 1, dtype=torch.long),
+        }, batch_size=[])
 
 
 class DCSLAOMTrueActionsDataset(IterableDataset):

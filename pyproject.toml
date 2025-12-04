@@ -39,7 +39,8 @@ dependencies = [
     "stable_baselines3",
     "sb3-contrib==2.4.0",
     "vector-quantize-pytorch==1.22.16",
-    "wandb"
+    "wandb",
+    "tensordict"
 ]
 
 [tool.ruff.lint.isort]

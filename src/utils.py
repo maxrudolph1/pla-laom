@@ -105,6 +105,7 @@ class DCSLAOMInMemoryDataset(Dataset):
                 self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
                 self.state_diffs = [torch.diff(state, dim=-2) for state in self.states]
                 self.img_hw = 84 #[84, 84] #df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
+                self.background_labels = [torch.tensor(df['background_id'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
             self.act_dim = self.actions[0][0].shape[-1]
             self.state_dim = self.states[0][0].shape[-1]
         
@@ -126,6 +127,9 @@ class DCSLAOMInMemoryDataset(Dataset):
         self.traj_len = self.observations[0].shape[0]
         assert 1 <= max_offset < self.traj_len
         self.max_offset = max_offset
+
+    def get_num_discriminator_outputs(self):
+        return len(torch.unique(torch.concatenate(self.background_labels)))
 
     def __get_padded_obs(self, traj_idx, idx):
         # stacking frames
@@ -159,6 +163,8 @@ class DCSLAOMInMemoryDataset(Dataset):
         offset = random.randint(1, self.max_offset)
         future_obs = self.__get_padded_obs(traj_idx, transition_idx + offset)
 
+        background_labels = self.background_labels[traj_idx][transition_idx].long()
+
         return TensorDict({
             "obs": obs,
             "next_obs": next_obs,
@@ -168,6 +174,7 @@ class DCSLAOMInMemoryDataset(Dataset):
             "next_state": next_state,
             "state_diff": state_diff,
             "offset": torch.tensor(offset - 1, dtype=torch.long),
+            "background_labels": background_labels,
         }, batch_size=[])
 
 

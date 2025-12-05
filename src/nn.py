@@ -209,6 +209,16 @@ class ActionDecoder(nn.Module):
         true_act_pred = self.model(latent_act)
         return true_act_pred
 
+class Discriminator(nn.Module):
+    def __init__(self, latent_act_dim, discriminator_dim=512, num_outputs=2):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(latent_act_dim, discriminator_dim),
+            nn.ReLU6(),
+            nn.Linear(discriminator_dim, num_outputs),
+        )
+    def forward(self, latent_act):
+        return self.model(latent_act)
 
 # IDM: (s_t, s_t+1) -> a_t
 class IDM(nn.Module):
@@ -460,6 +470,63 @@ class LAOM(nn.Module):
         latent_next_obs = self.obs_head(obs_emb.flatten(1).detach(), latent_action)
 
         return latent_next_obs, latent_action, obs_emb.detach()
+
+    @torch.no_grad()
+    def label(self, obs, next_obs):
+        # for faster forwad + unified batch norm stats, WARN: 2x batch size!
+        obs_emb, next_obs_emb = self.encoder(torch.concat([obs, next_obs])).split(obs.shape[0])
+        latent_action = self.act_head(obs_emb.flatten(1), next_obs_emb.flatten(1))
+        return latent_action
+
+
+class PLA(nn.Module):
+    def __init__(
+        self,
+        shape,
+        latent_act_dim,
+        encoder_scale=1,
+        encoder_channels=(16, 32, 64, 128, 256),
+        encoder_num_res_blocks=1,
+        encoder_dropout=0.0,
+        encoder_norm_out=True,
+        act_head_dim=512,
+        act_head_dropout=0.0,
+        obs_head_dim=512,
+        obs_head_dropout=0.0,
+        discriminator_dim=512,
+        num_discriminator_outputs=2,
+    ):
+        super().__init__()
+        self.inital_shape = shape
+
+        # encoder
+        conv_stack = []
+        for out_ch in encoder_channels:
+            conv_seq = EncoderBlock(shape, encoder_scale * out_ch, encoder_num_res_blocks, encoder_dropout)
+            shape = conv_seq.get_output_shape()
+            conv_stack.append(conv_seq)
+
+        self.encoder = nn.Sequential(
+            *conv_stack,
+            nn.Flatten(),
+            nn.LayerNorm(math.prod(shape), elementwise_affine=False) if encoder_norm_out else nn.Identity(),
+        )
+        self.act_head = LatentActHead(latent_act_dim, math.prod(shape), act_head_dim, dropout=act_head_dropout)
+        self.obs_head = LatentObsHead(latent_act_dim, math.prod(shape), obs_head_dim, dropout=obs_head_dropout)
+        self.final_encoder_shape = shape
+        self.latent_act_dim = latent_act_dim
+        self.discriminator = Discriminator(latent_act_dim, discriminator_dim=discriminator_dim, num_outputs=num_discriminator_outputs)
+        self.apply(weight_init)
+
+    def forward(self, obs, next_obs):
+        # for faster forwad + unified batch norm stats, WARN: 2x batch size!
+        obs_emb, next_obs_emb = self.encoder(torch.concat([obs, next_obs])).split(obs.shape[0])
+
+        latent_action = self.act_head(obs_emb.flatten(1), next_obs_emb.flatten(1))
+        latent_next_obs = self.obs_head(obs_emb.flatten(1).detach(), latent_action)
+        discriminator_logits = self.discriminator(latent_action)
+
+        return latent_next_obs, latent_action, discriminator_logits, obs_emb.detach()
 
     @torch.no_grad()
     def label(self, obs, next_obs):

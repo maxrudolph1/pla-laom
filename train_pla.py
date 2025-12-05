@@ -24,7 +24,7 @@ from tensordict import TensorDict, TensorDictBase
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from src.augmentations import Augmenter
-from src.nn import LAOM, ActionDecoder, Actor
+from src.nn import PLA
 from src.scheduler import linear_annealing_with_warmup
 from src.utils import (
     DCSInMemoryDataset,
@@ -45,7 +45,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @dataclass
-class LAOMConfig:
+class PLAConfig:
     num_epochs: int = 150
     batch_size: int = 2048
     use_aug: bool = False   
@@ -72,44 +72,11 @@ class LAOMConfig:
     has_policy_labels: bool = False
     has_distractor_labels: bool = False
     state_difference_probe: bool = False
+    discriminator_dim: int = 512
+    num_discriminator_outputs: int = 12
+    use_discriminator: bool = False
     data_path: str = ''
     
-
-@dataclass
-class BCConfig:
-    num_epochs: int = 1
-    batch_size: int = 64
-    learning_rate: float = 3e-4
-    weight_decay: float = 0.0
-    warmup_epochs: int = 5
-    encoder_scale: int = 1
-    encoder_num_res_blocks: int = 2
-    encoder_deep: bool = False
-    dropout: float = 0.0
-    use_aug: bool = False
-    frame_stack: int = 3
-    data_path: str = "data/example-data.hdf5"
-    dcs_backgrounds_path: str = "DAVIS/JPEGImages/480p"
-    dcs_backgrounds_split: str = "train"
-    eval_episodes: int = 10
-    eval_seed: int = 0
-
-
-@dataclass
-class DecoderConfig:
-    total_updates: int = 1
-    batch_size: int = 64
-    learning_rate: float = 3e-4
-    weight_decay: float = 0.0
-    warmup_epochs: int = 5
-    hidden_dim: int = 128
-    use_aug: bool = False
-    data_path: str = "data/test.hdf5"
-    dcs_backgrounds_path: str = "DAVIS/JPEGImages/480p"
-    dcs_backgrounds_split: str = "train"
-    eval_episodes: int = 10
-    eval_seed: int = 0
-
 
 @dataclass
 class Config:
@@ -118,15 +85,14 @@ class Config:
     name: str = "laom"
     seed: int = 0
 
-    lapo: LAOMConfig = field(default_factory=LAOMConfig)
-    bc: BCConfig = field(default_factory=BCConfig)
-    decoder: DecoderConfig = field(default_factory=DecoderConfig)
+    pla: PLAConfig = field(default_factory=PLAConfig)
+
 
     def __post_init__(self):
         self.name = f"{self.name}-{str(uuid.uuid4())}"
 
 
-def train_pla(config: LAOMConfig):
+def train_pla(config: PLAConfig):
     dataset = DCSLAOMInMemoryDataset(
         config.data_path, max_offset=config.future_obs_offset, frame_stack=config.frame_stack, device=DEVICE, custom_dataset=config.custom_dataset, normalize=config.normalize
     )
@@ -144,7 +110,7 @@ def train_pla(config: LAOMConfig):
         collate_fn=td_collate_fn,
     )
 
-    lapo = LAOM(
+    lapo = PLA(
         shape=(3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
         latent_act_dim=config.latent_action_dim,
         act_head_dim=config.act_head_dim,
@@ -156,6 +122,8 @@ def train_pla(config: LAOMConfig):
         encoder_num_res_blocks=config.encoder_num_res_blocks,
         encoder_dropout=config.encoder_dropout,
         encoder_norm_out=config.encoder_norm_out,
+        discriminator_dim=config.discriminator_dim,
+        num_discriminator_outputs=dataset.get_num_discriminator_outputs(),
     ).to(DEVICE)
 
     target_lapo = deepcopy(lapo)
@@ -211,8 +179,8 @@ def train_pla(config: LAOMConfig):
             states = batch["state"]
             next_states = batch["next_state"]
             state_diffs = batch["state_diff"]
-            policy_labels = batch.get("policy_label", None)
-            distractor_labels = batch.get("distractor_label", None)
+            # policy_labels = batch.get("policy_label", None)
+            background_labels = batch.get("background_labels", None)
             offset = batch["offset"]
 
 
@@ -225,9 +193,9 @@ def train_pla(config: LAOMConfig):
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 if config.use_aug:
                     # using augmenter directly will not work due to bf16
-                    latent_next_obs, latent_action, obs_hidden = lapo(obs_aug, future_obs_aug)
+                    latent_next_obs, latent_action, discriminator_logits, obs_hidden = lapo(obs_aug, future_obs_aug)
                 else:
-                    latent_next_obs, latent_action, obs_hidden = lapo(obs, future_obs)
+                    latent_next_obs, latent_action, discriminator_logits, obs_hidden = lapo(obs, future_obs)
 
                 with torch.no_grad():
                     if config.use_aug:
@@ -235,7 +203,12 @@ def train_pla(config: LAOMConfig):
                     else:
                         next_obs_target = target_lapo.encoder(next_obs).flatten(1)
 
-                loss = F.mse_loss(latent_next_obs, next_obs_target.detach())
+                if background_labels is not None and config.use_discriminator:
+                    discriminator_loss = F.cross_entropy(discriminator_logits, background_labels)
+                else:
+                    discriminator_loss = 0.0    # no background labels, so no discriminator loss
+
+                loss = F.mse_loss(latent_next_obs, next_obs_target.detach()) + discriminator_loss
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
@@ -283,8 +256,6 @@ def train_pla(config: LAOMConfig):
                         "lapo/state_difference_probe_mse_loss": state_difference_probe_loss.item(),
                         "lapo/act_probe_mse_loss": act_probe_loss.item(),
                         "lapo/state_act_probe_mse_loss": state_act_probe_loss.item(),
-                        # "lapo/pos_diff_probe_mse_loss": pos_diff_probe_loss.item(),
-                        # "lapo/vel_diff_probe_mse_loss": vel_diff_probe_loss.item(),
                         "lapo/throughput": total_tokens / (time.time() - start_time),
                         "lapo/learning_rate": scheduler.get_last_lr()[0],
                         "lapo/grad_norm": get_grad_norm(lapo).item(),
@@ -311,7 +282,7 @@ def train(config: Config):
     )
     set_seed(config.seed)
     # stage 1: pretraining lapo on unlabeled dataset
-    lapo = train_pla(config=config.lapo)
+    lapo = train_pla(config=config.pla)
 
 
     run.finish()

@@ -515,7 +515,7 @@ class PLA(nn.Module):
         self.obs_head = LatentObsHead(latent_act_dim, math.prod(shape), obs_head_dim, dropout=obs_head_dropout)
         self.final_encoder_shape = shape
         self.latent_act_dim = latent_act_dim
-        self.discriminator = Discriminator(latent_act_dim, discriminator_dim=discriminator_dim, num_outputs=num_discriminator_outputs)
+        # self.discriminator = Discriminator(latent_act_dim, discriminator_dim=discriminator_dim, num_outputs=num_discriminator_outputs)
         self.apply(weight_init)
 
     def forward(self, obs, next_obs):
@@ -524,9 +524,9 @@ class PLA(nn.Module):
 
         latent_action = self.act_head(obs_emb.flatten(1), next_obs_emb.flatten(1))
         latent_next_obs = self.obs_head(obs_emb.flatten(1).detach(), latent_action)
-        discriminator_logits = self.discriminator(latent_action)
+        # discriminator_logits = self.discriminator(latent_action)
 
-        return latent_next_obs, latent_action, discriminator_logits, obs_emb.detach()
+        return latent_next_obs, latent_action, obs_emb.detach()
 
     @torch.no_grad()
     def label(self, obs, next_obs):

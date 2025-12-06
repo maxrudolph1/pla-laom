@@ -24,7 +24,7 @@ from tensordict import TensorDict, TensorDictBase
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from src.augmentations import Augmenter
-from src.nn import PLA
+from src.nn import PLA, Discriminator
 from src.scheduler import linear_annealing_with_warmup
 from src.utils import (
     DCSInMemoryDataset,
@@ -74,7 +74,7 @@ class PLAConfig:
     state_difference_probe: bool = False
     discriminator_dim: int = 512
     num_discriminator_outputs: int = 12
-    use_discriminator: bool = False
+    discriminator_weight: float = 1.0
     data_path: str = ''
     
 
@@ -145,6 +145,9 @@ def train_pla(config: PLAConfig):
     if config.use_aug:
         augmenter = Augmenter(dataset.img_hw)
 
+    discriminator = Discriminator(config.latent_action_dim, discriminator_dim=config.discriminator_dim, num_outputs=dataset.get_num_discriminator_outputs()).to(DEVICE)
+    discriminator_optim = torch.optim.Adam(discriminator.parameters(), lr=config.learning_rate)
+
     act_linear_probe = nn.Linear(config.latent_action_dim, dataset.act_dim).to(DEVICE)
     act_probe_optim = torch.optim.Adam(act_linear_probe.parameters(), lr=config.learning_rate)
 
@@ -193,9 +196,9 @@ def train_pla(config: PLAConfig):
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 if config.use_aug:
                     # using augmenter directly will not work due to bf16
-                    latent_next_obs, latent_action, discriminator_logits, obs_hidden = lapo(obs_aug, future_obs_aug)
+                    latent_next_obs, latent_action, obs_hidden = lapo(obs_aug, future_obs_aug)
                 else:
-                    latent_next_obs, latent_action, discriminator_logits, obs_hidden = lapo(obs, future_obs)
+                    latent_next_obs, latent_action, obs_hidden = lapo(obs, future_obs)
 
                 with torch.no_grad():
                     if config.use_aug:
@@ -203,15 +206,19 @@ def train_pla(config: PLAConfig):
                     else:
                         next_obs_target = target_lapo.encoder(next_obs).flatten(1)
 
-                if background_labels is not None and config.use_discriminator:
-                    discriminator_loss = F.cross_entropy(discriminator_logits, background_labels)
+                if background_labels is not None and config.discriminator_weight > 0.0:
+                    discriminator_logits = discriminator(latent_action)
+                    discrim_probs = F.softmax(discriminator_logits, dim=-1)
+                    discrim_entropy = -torch.sum(discrim_probs * torch.log(discrim_probs), dim=-1).mean()
+                    pla_loss = -discrim_entropy
                 else:
-                    discriminator_loss = 0.0    # no background labels, so no discriminator loss
+                    pla_loss = 0.0
 
-                loss = F.mse_loss(latent_next_obs, next_obs_target.detach()) + discriminator_loss
+                loss = F.mse_loss(latent_next_obs, next_obs_target.detach()) + config.discriminator_weight * pla_loss
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
+
             if config.grad_norm is not None:
                 torch.nn.utils.clip_grad_norm_(lapo.parameters(), max_norm=config.grad_norm)
             optim.step()
@@ -232,6 +239,9 @@ def train_pla(config: PLAConfig):
                 pred_state_action = state_act_linear_probe(obs_hidden.detach())
                 state_act_probe_loss = F.mse_loss(pred_state_action, actions)
 
+                discriminator_logits = discriminator(latent_action.detach())
+                discriminator_loss = F.cross_entropy(discriminator_logits, background_labels)
+
             state_probe_optim.zero_grad(set_to_none=True)
             state_probe_loss.backward()
             state_probe_optim.step()
@@ -248,6 +258,10 @@ def train_pla(config: PLAConfig):
             state_act_probe_loss.backward()
             state_act_probe_optim.step()
 
+            discriminator_optim.zero_grad(set_to_none=True)
+            discriminator_loss.backward()
+            discriminator_optim.step()
+
             if total_iterations % 100 == 0:
                 wandb.log(
                     {
@@ -256,6 +270,9 @@ def train_pla(config: PLAConfig):
                         "lapo/state_difference_probe_mse_loss": state_difference_probe_loss.item(),
                         "lapo/act_probe_mse_loss": act_probe_loss.item(),
                         "lapo/state_act_probe_mse_loss": state_act_probe_loss.item(),
+                        "lapo/discriminator_loss": discriminator_loss.item(),
+                        "lapo/discriminator_entropy": discrim_entropy.item(),
+                        "lapo/pla_loss": pla_loss.item(),
                         "lapo/throughput": total_tokens / (time.time() - start_time),
                         "lapo/learning_rate": scheduler.get_last_lr()[0],
                         "lapo/grad_norm": get_grad_norm(lapo).item(),

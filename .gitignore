@@ -172,3 +172,5 @@ notebooks
 .ruff_cache
 
 data
+
+slurm_scripts/

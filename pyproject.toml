@@ -40,7 +40,8 @@ dependencies = [
     "sb3-contrib==2.4.0",
     "vector-quantize-pytorch==1.22.16",
     "wandb",
-    "tensordict"
+    "tensordict",
+    "submitit"
 ]
 
 [tool.ruff.lint.isort]

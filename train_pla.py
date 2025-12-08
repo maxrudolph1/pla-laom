@@ -1,4 +1,5 @@
 import math
+import sys
 import time
 import uuid
 import warnings
@@ -8,6 +9,7 @@ from typing import Optional
 
 import numpy as np
 import pyrallis
+import submitit
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,24 +20,11 @@ from torch.utils.data import DataLoader
 from tqdm import trange
 from typing import List, Dict
 from tensordict import TensorDict, TensorDictBase
-
+import time
 
 # Suppress datetime.utcnow() deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-from src.augmentations import Augmenter
-from src.nn import PLA, Discriminator
-from src.scheduler import linear_annealing_with_warmup
-from src.utils import (
-    DCSInMemoryDataset,
-    DCSLAOMInMemoryDataset,
-    create_env_from_df,
-    get_grad_norm,
-    get_optim_groups,
-    normalize_img,
-    set_seed,
-    soft_update,
-)
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -307,4 +296,63 @@ def train(config: Config):
 
 
 if __name__ == "__main__":
-    train()
+    slurm = False
+    if "--slurm" in sys.argv:
+        slurm = True
+        sys.argv.remove("--slurm")
+
+    if slurm:
+
+        TEMPLATE="""#!/bin/bash
+
+# Parameters
+#SBATCH --account=amyzhang
+#SBATCH --cpus-per-task=64
+#SBATCH --error=slurm_scripts/job_%j/err.err
+#SBATCH --output=slurm_scripts/job_%j/out.out
+#SBATCH --gpus-per-node=1
+#SBATCH --job-name=pla
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --partition=mll
+#SBATCH --time=2880
+
+source /u/mrudolph/miniconda3/etc/profile.d/conda.sh
+conda activate pla-laom
+python """ + " ".join(sys.argv) + """
+"""
+        import subprocess
+
+        path = "slurm_scripts/temp_submission.slurm"  # You may want to modify this value or get it from config
+
+        # Open file and append a line
+        with open(path, "w") as f:
+            f.write(TEMPLATE)
+
+        # Submit the file with sbatch
+        result = subprocess.run(["sbatch", path], capture_output=True, text=True)
+        jid = int(result.stdout.split(" ")[-1])
+        print("sbatch output:", jid)
+        print("sbatch error:", result.stderr)
+        import os
+        os.makedirs(f"slurm_scripts/job_{jid}", exist_ok=True)
+        with open(f"slurm_scripts/job_{jid}/submission.sh", "w") as f:
+            f.write(TEMPLATE)
+    else:
+
+
+        from src.augmentations import Augmenter
+        from src.nn import PLA, Discriminator
+        from src.scheduler import linear_annealing_with_warmup
+        from src.utils import (
+            DCSInMemoryDataset,
+            DCSLAOMInMemoryDataset,
+            create_env_from_df,
+            get_grad_norm,
+            get_optim_groups,
+            normalize_img,
+            set_seed,
+            soft_update,
+        )
+
+        train()

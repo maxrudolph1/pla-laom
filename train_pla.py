@@ -202,6 +202,7 @@ def train_pla(config: PLAConfig):
                     pla_loss = -discrim_entropy
                 else:
                     pla_loss = 0.0
+                    discrim_entropy = 0.0
 
                 loss = F.mse_loss(latent_next_obs, next_obs_target.detach()) + config.discriminator_weight * pla_loss
 

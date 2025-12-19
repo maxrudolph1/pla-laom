@@ -65,6 +65,7 @@ class PLAConfig:
     num_discriminator_outputs: int = 12
     discriminator_weight: float = 1.0
     data_path: str = ''
+    la_regularization: str = ''
     
 
 @dataclass
@@ -75,7 +76,6 @@ class Config:
     seed: int = 0
 
     pla: PLAConfig = field(default_factory=PLAConfig)
-
 
     def __post_init__(self):
         self.name = f"{self.name}-{str(uuid.uuid4())}"
@@ -189,6 +189,18 @@ def train_pla(config: PLAConfig):
                 else:
                     latent_next_obs, latent_action, obs_hidden = lapo(obs, future_obs)
 
+                if config.la_regularization == 'l2':
+                    latent_action = latent_action / torch.norm(latent_action, p=2, dim=-1).mean()
+                elif config.la_regularization == 'l1':
+                    latent_action = latent_action / torch.norm(latent_action, p=1, dim=-1).mean()
+                elif config.la_regularization == 'softmax':
+                    latent_action = F.softmax(latent_action, dim=-1)
+                elif config.la_regularization == 'tanh':
+                    latent_action = torch.tanh(latent_action)
+                elif config.la_regularization == 'none' or config.la_regularization == '':
+                    pass
+
+
                 with torch.no_grad():
                     if config.use_aug:
                         next_obs_target = target_lapo.encoder(next_obs_aug).flatten(1)
@@ -201,8 +213,8 @@ def train_pla(config: PLAConfig):
                     discrim_entropy = -torch.sum(discrim_probs * torch.log(discrim_probs), dim=-1).mean()
                     pla_loss = -discrim_entropy
                 else:
-                    pla_loss = 0.0
-                    discrim_entropy = 0.0
+                    pla_loss = torch.tensor(0.0, device=DEVICE)
+                    discrim_entropy = torch.tensor(0.0, device=DEVICE)
 
                 loss = F.mse_loss(latent_next_obs, next_obs_target.detach()) + config.discriminator_weight * pla_loss
 

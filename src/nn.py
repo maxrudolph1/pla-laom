@@ -495,6 +495,7 @@ class PLA(nn.Module):
         obs_head_dropout=0.0,
         discriminator_dim=512,
         num_discriminator_outputs=2,
+        state_regularization='',
     ):
         super().__init__()
         self.inital_shape = shape
@@ -506,11 +507,29 @@ class PLA(nn.Module):
             shape = conv_seq.get_output_shape()
             conv_stack.append(conv_seq)
 
+        if state_regularization == 'layernorm':
+            self.state_regularization = nn.LayerNorm(math.prod(shape), elementwise_affine=False)
+        elif state_regularization == 'l2':
+            self.state_regularization = nn.functional.normalize(x, p=2, dim=-1)
+        elif state_regularization == 'l1':
+            self.state_regularization = nn.functional.normalize(x, p=1, dim=-1)
+        elif state_regularization == 'softmax':
+            self.state_regularization = nn.functional.softmax(x, dim=-1)
+        elif state_regularization == 'tanh':
+            self.state_regularization = torch.tanh(x)
+        elif state_regularization == 'none' or state_regularization == '':
+            self.state_regularization = nn.Identity()
+        else:
+            raise ValueError(f"Invalid state regularization: {state_regularization}")
+            
         self.encoder = nn.Sequential(
             *conv_stack,
             nn.Flatten(),
-            nn.LayerNorm(math.prod(shape), elementwise_affine=False) if encoder_norm_out else nn.Identity(),
+            self.state_regularization,
         )
+        
+
+        
         self.act_head = LatentActHead(latent_act_dim, math.prod(shape), act_head_dim, dropout=act_head_dropout)
         self.obs_head = LatentObsHead(latent_act_dim, math.prod(shape), obs_head_dim, dropout=obs_head_dropout)
         self.final_encoder_shape = shape

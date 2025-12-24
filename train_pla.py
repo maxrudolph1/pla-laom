@@ -66,6 +66,7 @@ class PLAConfig:
     discriminator_weight: float = 1.0
     data_path: str = ''
     la_regularization: str = ''
+    state_regularization: str = ''
     
 
 @dataclass
@@ -113,6 +114,7 @@ def train_pla(config: PLAConfig):
         encoder_norm_out=config.encoder_norm_out,
         discriminator_dim=config.discriminator_dim,
         num_discriminator_outputs=dataset.get_num_discriminator_outputs(),
+        state_regularization=config.state_regularization,
     ).to(DEVICE)
 
     target_lapo = deepcopy(lapo)
@@ -320,14 +322,14 @@ if __name__ == "__main__":
 
 # Parameters
 #SBATCH --account=amyzhang
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=16
 #SBATCH --error=slurm_scripts/job_%j/err.err
 #SBATCH --output=slurm_scripts/job_%j/out.out
 #SBATCH --gpus-per-node=1
 #SBATCH --job-name=pla
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --partition=mll
+#SBATCH --partition=allnodes
 #SBATCH --time=2880
 
 source /u/mrudolph/miniconda3/etc/profile.d/conda.sh

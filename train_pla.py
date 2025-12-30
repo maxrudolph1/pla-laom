@@ -291,6 +291,182 @@ def train_pla(config: PLAConfig):
     return lapo
 
 
+def fine_tune_pla(lapo: PLA, config: PLAConfig):
+    dataset = DCSLAOMInMemoryDataset(
+        config.data_path, max_offset=config.future_obs_offset, frame_stack=config.frame_stack, device=DEVICE, custom_dataset=config.custom_dataset, normalize=config.normalize
+    )
+
+    def td_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> TensorDictBase:
+        stacked_dict = {}
+        for key in batch[0].keys():
+            stacked_dict[key] = torch.stack([item[key] for item in batch])
+        return TensorDict(stacked_dict, batch_size=len(batch))
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        collate_fn=td_collate_fn,
+    )
+
+    target_lapo = deepcopy(lapo)
+    for p in target_lapo.parameters():
+        p.requires_grad_(False)
+
+    torchinfo.summary(
+        lapo,
+        input_size=[
+            (1, 3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
+            (1, 3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
+        ],
+    )
+    optim = torch.optim.Adam(
+        params=get_optim_groups(lapo, config.weight_decay),
+        lr=config.learning_rate,
+        fused=True,
+    )
+    if config.use_aug:
+        augmenter = Augmenter(dataset.img_hw)
+
+    discriminator = Discriminator(config.latent_action_dim, discriminator_dim=config.discriminator_dim, num_outputs=dataset.get_num_discriminator_outputs()).to(DEVICE)
+    discriminator_optim = torch.optim.Adam(discriminator.parameters(), lr=config.learning_rate)
+
+    act_linear_probe = nn.Linear(config.latent_action_dim, dataset.act_dim).to(DEVICE)
+    act_probe_optim = torch.optim.Adam(act_linear_probe.parameters(), lr=config.learning_rate)
+
+    state_act_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.act_dim).to(DEVICE)
+    state_act_probe_optim = torch.optim.Adam(state_act_linear_probe.parameters(), lr=config.learning_rate)
+
+    state_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.state_dim).to(DEVICE)
+    state_probe_optim = torch.optim.Adam(state_probe.parameters(), lr=config.learning_rate)
+
+    state_difference_probe = nn.Linear(lapo.latent_act_dim, dataset.state_dim).to(DEVICE)
+    state_difference_probe_optim = torch.optim.Adam(state_difference_probe.parameters(), lr=config.learning_rate)
+
+    # scheduler setup
+    total_updates = len(dataloader) * config.num_epochs
+    warmup_updates = len(dataloader) * config.warmup_epochs
+    scheduler = linear_annealing_with_warmup(optim, warmup_updates, total_updates)
+
+    start_time = time.time()
+    total_iterations = 0
+    total_tokens = 0
+    for epoch in trange(config.num_epochs, desc="Epochs"):
+        lapo.train()
+        for i, batch in enumerate(dataloader):
+            total_tokens += config.batch_size
+            total_iterations += 1
+
+            batch = batch.to(DEVICE)
+            obs = normalize_img(batch["obs"].permute((0, 3, 1, 2)))
+            next_obs = normalize_img(batch["next_obs"].permute((0, 3, 1, 2)))
+            future_obs = normalize_img(batch["future_obs"].permute((0, 3, 1, 2)))
+            actions = batch["action"]
+            states = batch["state"]
+            next_states = batch["next_state"]
+            state_diffs = batch["state_diff"]
+            # policy_labels = batch.get("policy_label", None)
+            background_labels = batch.get("background_labels", None)
+            offset = batch["offset"]
+
+
+            if config.use_aug:
+                obs_aug = augmenter(obs)
+                future_obs_aug = augmenter(future_obs)
+                next_obs_aug = augmenter(next_obs)
+
+            # update lapo
+            with torch.autocast(DEVICE, dtype=torch.bfloat16):
+                if config.use_aug:
+                    # using augmenter directly will not work due to bf16
+                    latent_next_obs, latent_action, obs_hidden = lapo(obs_aug, future_obs_aug)
+                    target_nextobs, target_latent_action, target_obs_hidden = target_lapo(obs_aug, future_obs_aug)
+                else:
+                    latent_next_obs, latent_action, obs_hidden = lapo(obs, future_obs)
+                    target_nextobs, target_latent_action, target_obs_hidden = target_lapo(obs, future_obs)
+
+                if background_labels is not None and config.discriminator_weight > 0.0:
+                    discriminator_logits = discriminator(latent_action)
+                    # discrim_probs = F.softmax(discriminator_logits, dim=-1)
+                    # discrim_entropy = -torch.sum(discrim_probs * torch.log(discrim_probs), dim=-1).mean()
+                    # pla_loss = -discrim_entropy
+                    discriminator_loss = F.cross_entropy(discriminator_logits, background_labels)
+                else:
+                    discriminator_loss = torch.tensor(0.0, device=DEVICE)
+
+                loss = F.mse_loss(latent_action, target_latent_action.detach()) - config.discriminator_weight * discriminator_loss
+
+            optim.zero_grad(set_to_none=True)
+            loss.backward()
+
+            if config.grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(lapo.parameters(), max_norm=config.grad_norm)
+            optim.step()
+            scheduler.step()
+            if i % config.target_update_every == 0:
+                soft_update(target_lapo, lapo, tau=config.target_tau)
+
+            with torch.autocast(DEVICE, dtype=torch.bfloat16):
+                pred_states = state_probe(obs_hidden.detach())
+                state_probe_loss = F.mse_loss(pred_states, states)
+
+                pred_state_difference = state_difference_probe(latent_action.detach())
+                state_difference_probe_loss = F.mse_loss(pred_state_difference, state_diffs)
+
+                pred_action = act_linear_probe(latent_action.detach())
+                act_probe_loss = F.mse_loss(pred_action, actions)
+
+                pred_state_action = state_act_linear_probe(obs_hidden.detach())
+                state_act_probe_loss = F.mse_loss(pred_state_action, actions)
+
+                discriminator_logits = discriminator(latent_action.detach())
+                discriminator_loss = F.cross_entropy(discriminator_logits, background_labels)
+
+            state_probe_optim.zero_grad(set_to_none=True)
+            state_probe_loss.backward()
+            state_probe_optim.step()
+
+            state_difference_probe_optim.zero_grad(set_to_none=True)
+            state_difference_probe_loss.backward()
+            state_difference_probe_optim.step()
+
+            act_probe_optim.zero_grad(set_to_none=True)
+            act_probe_loss.backward()
+            act_probe_optim.step()
+
+            state_act_probe_optim.zero_grad(set_to_none=True)
+            state_act_probe_loss.backward()
+            state_act_probe_optim.step()
+
+            discriminator_optim.zero_grad(set_to_none=True)
+            discriminator_loss.backward()
+            discriminator_optim.step()
+
+            if total_iterations % 100 == 0:
+                wandb.log(
+                    {
+                        "lapo/mse_loss": loss.item(),
+                        "lapo/state_probe_mse_loss": state_probe_loss.item(),
+                        "lapo/state_difference_probe_mse_loss": state_difference_probe_loss.item(),
+                        "lapo/act_probe_mse_loss": act_probe_loss.item(),
+                        "lapo/state_act_probe_mse_loss": state_act_probe_loss.item(),
+                        "lapo/discriminator_loss": discriminator_loss.item(),
+                        "lapo/discriminator_entropy": discrim_entropy.item(),
+                        "lapo/pla_loss": pla_loss.item(),
+                        "lapo/throughput": total_tokens / (time.time() - start_time),
+                        "lapo/learning_rate": scheduler.get_last_lr()[0],
+                        "lapo/grad_norm": get_grad_norm(lapo).item(),
+                        "lapo/target_obs_norm": torch.norm(next_obs_target, p=2, dim=-1).mean().item(),
+                        "lapo/online_obs_norm": torch.norm(latent_next_obs, p=2, dim=-1).mean().item(),
+                        "lapo/latent_act_norm": torch.norm(latent_action, p=2, dim=-1).mean().item(),
+                        "lapo/epoch": epoch,
+                        "lapo/total_steps": total_iterations,
+                    }
+                )
+
+    return lapo
+
+
 
 @pyrallis.wrap()
 def train(config: Config):
@@ -304,6 +480,11 @@ def train(config: Config):
     set_seed(config.seed)
     # stage 1: pretraining lapo on unlabeled dataset
     lapo = train_pla(config=config.pla)
+    
+    # fine-tune pla
+    lapo = fine_tune_pla(lapo=lapo, config=config.pla)
+    
+    
 
 
     run.finish()

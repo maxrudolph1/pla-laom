@@ -478,7 +478,30 @@ class LAOM(nn.Module):
         latent_action = self.act_head(obs_emb.flatten(1), next_obs_emb.flatten(1))
         return latent_action
 
+class L2Normalization(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return nn.functional.normalize(x, p=2, dim=-1)
 
+class L1Normalization(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return nn.functional.normalize(x, p=1, dim=-1)
+
+class SoftmaxNormalization(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return nn.functional.softmax(x, dim=-1)
+
+class TanhNormalization(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return torch.tanh(x)
+    
 class PLA(nn.Module):
     def __init__(
         self,
@@ -510,13 +533,13 @@ class PLA(nn.Module):
         if state_regularization == 'layernorm':
             self.state_regularization = nn.LayerNorm(math.prod(shape), elementwise_affine=False)
         elif state_regularization == 'l2':
-            self.state_regularization = nn.functional.normalize(x, p=2, dim=-1)
+            self.state_regularization = L2Normalization()
         elif state_regularization == 'l1':
-            self.state_regularization = nn.functional.normalize(x, p=1, dim=-1)
+            self.state_regularization = L1Normalization()
         elif state_regularization == 'softmax':
-            self.state_regularization = nn.functional.softmax(x, dim=-1)
+            self.state_regularization = SoftmaxNormalization()
         elif state_regularization == 'tanh':
-            self.state_regularization = torch.tanh(x)
+            self.state_regularization = TanhNormalization()
         elif state_regularization == 'none' or state_regularization == '':
             self.state_regularization = nn.Identity()
         else:

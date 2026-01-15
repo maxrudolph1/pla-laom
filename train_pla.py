@@ -21,7 +21,8 @@ from tqdm import trange
 from typing import List, Dict
 from tensordict import TensorDict, TensorDictBase
 import time
-
+from pathlib import Path
+import os
 # Suppress datetime.utcnow() deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -31,7 +32,6 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 @dataclass
 class PLAConfig:
@@ -67,6 +67,8 @@ class PLAConfig:
     data_path: str = ''
     la_regularization: str = ''
     state_regularization: str = ''
+    behavior_loss_coef: float = 0.1
+    alignment_method: str = 'discriminator'
     
 
 @dataclass
@@ -74,7 +76,11 @@ class Config:
     project: str = "laom"
     group: str = "laom"
     name: str = "laom"
+    save_path: str = 'artifacts'
+    ckpt_path: str = ''
     seed: int = 0
+    pretrain: bool = False
+    fine_tune: bool = True
 
     pla: PLAConfig = field(default_factory=PLAConfig)
 
@@ -116,7 +122,7 @@ def train_pla(config: PLAConfig):
         num_discriminator_outputs=dataset.get_num_discriminator_outputs(),
         state_regularization=config.state_regularization,
     ).to(DEVICE)
-
+    
     target_lapo = deepcopy(lapo)
     for p in target_lapo.parameters():
         p.requires_grad_(False)
@@ -291,7 +297,7 @@ def train_pla(config: PLAConfig):
     return lapo
 
 
-def fine_tune_pla(lapo: PLA, config: PLAConfig):
+def fine_tune_pla(pla: nn.Module, config: PLAConfig):
     dataset = DCSLAOMInMemoryDataset(
         config.data_path, max_offset=config.future_obs_offset, frame_stack=config.frame_stack, device=DEVICE, custom_dataset=config.custom_dataset, normalize=config.normalize
     )
@@ -309,24 +315,23 @@ def fine_tune_pla(lapo: PLA, config: PLAConfig):
         collate_fn=td_collate_fn,
     )
 
-    target_lapo = deepcopy(lapo)
-    for p in target_lapo.parameters():
+    target_pla = deepcopy(pla)
+    for p in target_pla.parameters():
         p.requires_grad_(False)
+    target_pla.to(DEVICE)
 
     torchinfo.summary(
-        lapo,
+        pla,
         input_size=[
             (1, 3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
             (1, 3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
         ],
     )
     optim = torch.optim.Adam(
-        params=get_optim_groups(lapo, config.weight_decay),
+        params=get_optim_groups(pla, config.weight_decay),
         lr=config.learning_rate,
         fused=True,
     )
-    if config.use_aug:
-        augmenter = Augmenter(dataset.img_hw)
 
     discriminator = Discriminator(config.latent_action_dim, discriminator_dim=config.discriminator_dim, num_outputs=dataset.get_num_discriminator_outputs()).to(DEVICE)
     discriminator_optim = torch.optim.Adam(discriminator.parameters(), lr=config.learning_rate)
@@ -334,13 +339,13 @@ def fine_tune_pla(lapo: PLA, config: PLAConfig):
     act_linear_probe = nn.Linear(config.latent_action_dim, dataset.act_dim).to(DEVICE)
     act_probe_optim = torch.optim.Adam(act_linear_probe.parameters(), lr=config.learning_rate)
 
-    state_act_linear_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.act_dim).to(DEVICE)
+    state_act_linear_probe = nn.Linear(math.prod(pla.final_encoder_shape), dataset.act_dim).to(DEVICE)
     state_act_probe_optim = torch.optim.Adam(state_act_linear_probe.parameters(), lr=config.learning_rate)
 
-    state_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.state_dim).to(DEVICE)
+    state_probe = nn.Linear(math.prod(pla.final_encoder_shape), dataset.state_dim).to(DEVICE)
     state_probe_optim = torch.optim.Adam(state_probe.parameters(), lr=config.learning_rate)
 
-    state_difference_probe = nn.Linear(lapo.latent_act_dim, dataset.state_dim).to(DEVICE)
+    state_difference_probe = nn.Linear(pla.latent_act_dim, dataset.state_dim).to(DEVICE)
     state_difference_probe_optim = torch.optim.Adam(state_difference_probe.parameters(), lr=config.learning_rate)
 
     # scheduler setup
@@ -352,7 +357,7 @@ def fine_tune_pla(lapo: PLA, config: PLAConfig):
     total_iterations = 0
     total_tokens = 0
     for epoch in trange(config.num_epochs, desc="Epochs"):
-        lapo.train()
+        pla.train()
         for i, batch in enumerate(dataloader):
             total_tokens += config.batch_size
             total_iterations += 1
@@ -367,44 +372,32 @@ def fine_tune_pla(lapo: PLA, config: PLAConfig):
             state_diffs = batch["state_diff"]
             # policy_labels = batch.get("policy_label", None)
             background_labels = batch.get("background_labels", None)
-            offset = batch["offset"]
-
-
-            if config.use_aug:
-                obs_aug = augmenter(obs)
-                future_obs_aug = augmenter(future_obs)
-                next_obs_aug = augmenter(next_obs)
 
             # update lapo
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
-                if config.use_aug:
-                    # using augmenter directly will not work due to bf16
-                    latent_next_obs, latent_action, obs_hidden = lapo(obs_aug, future_obs_aug)
-                    target_nextobs, target_latent_action, target_obs_hidden = target_lapo(obs_aug, future_obs_aug)
-                else:
-                    latent_next_obs, latent_action, obs_hidden = lapo(obs, future_obs)
-                    target_nextobs, target_latent_action, target_obs_hidden = target_lapo(obs, future_obs)
+                latent_next_obs, latent_action, obs_hidden = pla(obs, future_obs)
+                target_latent_next_obs, target_latent_action, target_obs_hidden = target_pla(obs, future_obs)
 
-                if background_labels is not None and config.discriminator_weight > 0.0:
+                if config.alignment_method == 'discriminator':
                     discriminator_logits = discriminator(latent_action)
-                    # discrim_probs = F.softmax(discriminator_logits, dim=-1)
-                    # discrim_entropy = -torch.sum(discrim_probs * torch.log(discrim_probs), dim=-1).mean()
-                    # pla_loss = -discrim_entropy
-                    discriminator_loss = F.cross_entropy(discriminator_logits, background_labels)
+                    alignment_loss = F.cross_entropy(discriminator_logits, background_labels)
+                elif config.alignment_method == 'contrastive':
+                    import pdb; pdb.set_trace()
                 else:
-                    discriminator_loss = torch.tensor(0.0, device=DEVICE)
-
-                loss = F.mse_loss(latent_action, target_latent_action.detach()) - config.discriminator_weight * discriminator_loss
+                    alignment_loss = torch.tensor(0.0, device=DEVICE)
+                    
+                behavior_loss = F.mse_loss(latent_next_obs, target_latent_next_obs.detach())
+                loss =  - (alignment_loss + config.behavior_loss_coef * behavior_loss)
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
 
             if config.grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(lapo.parameters(), max_norm=config.grad_norm)
+                torch.nn.utils.clip_grad_norm_(pla.parameters(), max_norm=config.grad_norm)
+                
             optim.step()
             scheduler.step()
-            if i % config.target_update_every == 0:
-                soft_update(target_lapo, lapo, tau=config.target_tau)
+
 
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 pred_states = state_probe(obs_hidden.detach())
@@ -445,26 +438,27 @@ def fine_tune_pla(lapo: PLA, config: PLAConfig):
             if total_iterations % 100 == 0:
                 wandb.log(
                     {
-                        "lapo/mse_loss": loss.item(),
-                        "lapo/state_probe_mse_loss": state_probe_loss.item(),
-                        "lapo/state_difference_probe_mse_loss": state_difference_probe_loss.item(),
-                        "lapo/act_probe_mse_loss": act_probe_loss.item(),
-                        "lapo/state_act_probe_mse_loss": state_act_probe_loss.item(),
-                        "lapo/discriminator_loss": discriminator_loss.item(),
-                        "lapo/discriminator_entropy": discrim_entropy.item(),
-                        "lapo/pla_loss": pla_loss.item(),
-                        "lapo/throughput": total_tokens / (time.time() - start_time),
-                        "lapo/learning_rate": scheduler.get_last_lr()[0],
-                        "lapo/grad_norm": get_grad_norm(lapo).item(),
-                        "lapo/target_obs_norm": torch.norm(next_obs_target, p=2, dim=-1).mean().item(),
-                        "lapo/online_obs_norm": torch.norm(latent_next_obs, p=2, dim=-1).mean().item(),
-                        "lapo/latent_act_norm": torch.norm(latent_action, p=2, dim=-1).mean().item(),
-                        "lapo/epoch": epoch,
-                        "lapo/total_steps": total_iterations,
+                        "pla/mse_loss": loss.item(),
+                        "pla/state_probe_mse_loss": state_probe_loss.item(),
+                        "pla/state_difference_probe_mse_loss": state_difference_probe_loss.item(),
+                        "pla/act_probe_mse_loss": act_probe_loss.item(),
+                        "pla/state_act_probe_mse_loss": state_act_probe_loss.item(),
+                        "pla/discriminator_loss": discriminator_loss.item(),
+                        "pla/alignment_loss": alignment_loss.item(),
+                        "pla/behavior_loss": behavior_loss.item(),
+                        "pla/total_loss": loss.item(),
+                        "pla/throughput": total_tokens / (time.time() - start_time),
+                        "pla/learning_rate": scheduler.get_last_lr()[0],
+                        "pla/grad_norm": get_grad_norm(pla).item(),
+                        "pla/target_obs_norm": torch.norm(target_latent_next_obs, p=2, dim=-1).mean().item(),
+                        "pla/online_obs_norm": torch.norm(latent_next_obs, p=2, dim=-1).mean().item(),
+                        "pla/latent_act_norm": torch.norm(latent_action, p=2, dim=-1).mean().item(),
+                        "pla/epoch": epoch,
+                        "pla/total_steps": total_iterations,
                     }
                 )
 
-    return lapo
+    return pla
 
 
 
@@ -478,17 +472,28 @@ def train(config: Config):
         save_code=True,
     )
     set_seed(config.seed)
+
     # stage 1: pretraining lapo on unlabeled dataset
-    lapo = train_pla(config=config.pla)
+    if config.pretrain:
+        artifact_path = Path(config.save_path) / config.group / config.name        
+        os.makedirs(artifact_path, exist_ok=True)
+        pla = train_pla(config=config.pla)
+        pla.save(artifact_path / "pretrained.pth")
+    else:
+        pla = PLA.load(path=config.ckpt_path, map_location=DEVICE)
     
-    # fine-tune pla
-    lapo = fine_tune_pla(lapo=lapo, config=config.pla)
+    if config.fine_tune: 
+        # fine-tune pla
+        pla = fine_tune_pla(pla=pla, config=config.pla)
+        artifact_path = Path(config.save_path) / config.group / config.name   / "fine-tuned"     
+        os.makedirs(artifact_path, exist_ok=True)
+        pla.save(artifact_path / "fine-tuned.pth")
     
     
 
 
     run.finish()
-    return lapo #, actor, action_decoder
+    return pla #, actor, action_decoder
 
 
 if __name__ == "__main__":
@@ -498,6 +503,9 @@ if __name__ == "__main__":
         sys.argv.remove("--slurm")
 
     if slurm:
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
 
         TEMPLATE="""#!/bin/bash
 
@@ -506,12 +514,12 @@ if __name__ == "__main__":
 #SBATCH --cpus-per-task=16
 #SBATCH --error=slurm_scripts/job_%j/err.err
 #SBATCH --output=slurm_scripts/job_%j/out.out
-#SBATCH --gpus-per-node=1
-#SBATCH --job-name=pla
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --job-name=pla-fine-tune
+#SBATCH --mem=128GB
+#SBATCH --gres=gpu:1
 #SBATCH --partition=allnodes
-#SBATCH --time=2880
+#SBATCH --exclude=slurm-node-008
+#SBATCH --time=6:00:00
 
 source /u/mrudolph/miniconda3/etc/profile.d/conda.sh
 conda activate pla-laom

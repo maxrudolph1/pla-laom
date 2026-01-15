@@ -521,6 +521,27 @@ class PLA(nn.Module):
         state_regularization='',
     ):
         super().__init__()
+        init_kwargs = {
+            "shape": shape,
+            "latent_act_dim": latent_act_dim,
+            "encoder_scale": encoder_scale,
+            "encoder_channels": encoder_channels,
+            "encoder_num_res_blocks": encoder_num_res_blocks,
+            "encoder_dropout": encoder_dropout,
+            "encoder_norm_out": encoder_norm_out,
+            "act_head_dim": act_head_dim,
+            "act_head_dropout": act_head_dropout,
+            "obs_head_dim": obs_head_dim,
+            "obs_head_dropout": obs_head_dropout,
+            "discriminator_dim": discriminator_dim,
+            "num_discriminator_outputs": num_discriminator_outputs,
+            "state_regularization": state_regularization,
+        }
+        self.init_kwargs = init_kwargs
+        for name, value in init_kwargs.items():
+            # Skip state_regularization since we create it as a module below
+            if name != 'state_regularization':
+                setattr(self, name, value)
         self.inital_shape = shape
 
         # encoder
@@ -559,10 +580,11 @@ class PLA(nn.Module):
         self.latent_act_dim = latent_act_dim
         # self.discriminator = Discriminator(latent_act_dim, discriminator_dim=discriminator_dim, num_outputs=num_discriminator_outputs)
         self.apply(weight_init)
-
+        
     def forward(self, obs, next_obs):
         # for faster forwad + unified batch norm stats, WARN: 2x batch size!
         obs_emb, next_obs_emb = self.encoder(torch.concat([obs, next_obs])).split(obs.shape[0])
+
 
         latent_action = self.act_head(obs_emb.flatten(1), next_obs_emb.flatten(1))
         latent_next_obs = self.obs_head(obs_emb.flatten(1).detach(), latent_action)
@@ -576,6 +598,34 @@ class PLA(nn.Module):
         obs_emb, next_obs_emb = self.encoder(torch.concat([obs, next_obs])).split(obs.shape[0])
         latent_action = self.act_head(obs_emb.flatten(1), next_obs_emb.flatten(1))
         return latent_action
+    
+    def save(self, path):
+        torch.save(
+            {
+                "state_dict": self.state_dict(),
+                "init_kwargs": getattr(self, "init_kwargs", None),
+            },
+            path,
+        )
+        
+    @classmethod
+    def load(cls, path, map_location=None):
+        checkpoint = torch.load(path, map_location=map_location)
+        
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            init_kwargs = checkpoint.get("init_kwargs")
+            if init_kwargs is not None:
+                instance = cls(**init_kwargs)
+                instance.init_kwargs = init_kwargs
+            else:
+                # Attempt to instantiate with no args if no saved kwargs found
+                instance = cls()
+            instance.load_state_dict(checkpoint["state_dict"])
+            return instance
+        else:
+            raise ValueError(f"Invalid checkpoint: {path}")
+    
+
 
 
 class LAOMWithLabels(nn.Module):

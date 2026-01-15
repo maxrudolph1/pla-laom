@@ -10,10 +10,10 @@ for regularization in {l2,l1,softmax,none}; do
     python train_pla.py \
         --pla.custom_dataset=True \
         --pla.data_path=/u/mrudolph/documents/pla-laom/data/pm_medium_distracting/policy_rollouts/15_policies/12_backgrounds/action_repeat_1/8192_episodes/8192_episodes.hdf5 \
-        --name=12232025-state-regularization-sweep \
+        --name=12242025-state-regularization-sweep \
         --pla.discriminator_weight=$weight \
         --seed=$i \
-        --group=12232025-state-regularization-sweep \
+        --group=12242025-state-regularization-sweep \
         --pla.num_epochs=300 \
         --pla.state_regularization=$regularization \
         --slurm

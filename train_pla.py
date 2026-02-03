@@ -387,7 +387,7 @@ def fine_tune_pla(pla: nn.Module, config: PLAConfig):
                     alignment_loss = torch.tensor(0.0, device=DEVICE)
                     
                 behavior_loss = F.mse_loss(latent_next_obs, target_latent_next_obs.detach())
-                loss =  - (alignment_loss + config.behavior_loss_coef * behavior_loss)
+                loss =  config.behavior_loss_coef * behavior_loss - alignment_loss
 
             optim.zero_grad(set_to_none=True)
             loss.backward()

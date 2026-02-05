@@ -21,9 +21,6 @@ skip-magic-trailing-comma = false
 name = "pla-laom"
 version = "0.1.0"
 dependencies = [
-    "torchvision",
-    "torchinfo",
-    "torcheval",
     "opencv-python",
     "mujoco==3.2.0",
     "numpy",

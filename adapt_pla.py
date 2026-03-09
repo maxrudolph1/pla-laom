@@ -8,6 +8,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
+# Set CUDA device before importing torch (respects CUDA_VISIBLE_DEVICES env var if set)
+# Can override by setting CUDA_DEVICE environment variable
+# if "CUDA_DEVICE" in os.environ and "CUDA_VISIBLE_DEVICES" not in os.environ:
+#     os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_DEVICE"]
+
 import pyrallis
 import torch
 import torch.nn as nn
@@ -27,6 +32,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# DEVICE = torch.device("cuda:1")
 
 
 class AdapterMLP(nn.Module):
@@ -50,22 +56,36 @@ class AdapterMLP(nn.Module):
 
 
 class ReconstructionMLP(nn.Module):
-    """Reconstruction MLP that tries to reconstruct the original latent action from adapted version."""
-    def __init__(self, input_dim: int, hidden_dim: int = 512, num_layers: int = 2, dropout: float = 0.0):
+    """Reconstruction MLP that tries to reconstruct the original latent action from adapted version.
+    
+    Optionally accepts a one-hot encoded background distractor vector as additional input.
+    """
+    def __init__(self, input_dim: int, hidden_dim: int = 512, num_layers: int = 2, dropout: float = 0.0, num_backgrounds: int = 0):
         super().__init__()
+        self.num_backgrounds = num_backgrounds
+        # Input dim includes latent action dim + one-hot background vector
+        total_input_dim = input_dim + num_backgrounds
+        
         layers = []
-        in_dim = input_dim
+        in_dim = total_input_dim
         for i in range(num_layers - 1):
             layers.append(nn.Linear(in_dim, hidden_dim))
             layers.append(nn.ReLU())
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
             in_dim = hidden_dim
-        # Final layer outputs same dimension as input (to reconstruct original latent action)
+        # Final layer outputs same dimension as latent action (to reconstruct original latent action)
         layers.append(nn.Linear(in_dim, input_dim))
         self.mlp = nn.Sequential(*layers)
     
-    def forward(self, x):
+    def forward(self, x, background_onehot=None):
+        """
+        Args:
+            x: Adapted latent action tensor [batch_size, latent_action_dim]
+            background_onehot: One-hot encoded background labels [batch_size, num_backgrounds]
+        """
+        if self.num_backgrounds > 0 and background_onehot is not None:
+            x = torch.cat([x, background_onehot], dim=-1)
         return self.mlp(x)
 
 
@@ -77,10 +97,11 @@ class AdaptedPLA(nn.Module):
         obs, next_obs -> frozen_pla.encoder -> obs_emb, next_obs_emb
         obs_emb, next_obs_emb -> frozen_pla.act_head (IDM) -> latent_action
         latent_action -> adapter_mlp -> adapted_latent_action
-        adapted_latent_action -> reconstruction_mlp -> reconstructed_latent_action
+        adapted_latent_action, background_onehot -> reconstruction_mlp -> reconstructed_latent_action
         
     The reconstruction MLP is trained to reconstruct the original latent_action from adapted_latent_action,
-    which helps preserve the structure of the original latent action space.
+    conditioned on the background distractor. This helps the adapter learn to remove background-specific
+    information while preserving action-relevant structure.
     """
     def __init__(
         self,
@@ -91,9 +112,11 @@ class AdaptedPLA(nn.Module):
         reconstruction_hidden_dim: int = 512,
         reconstruction_num_layers: int = 2,
         reconstruction_dropout: float = 0.0,
+        num_backgrounds: int = 0,
     ):
         super().__init__()
         self.frozen_pla = frozen_pla
+        self.num_backgrounds = num_backgrounds
         
         # Freeze all parameters of the original PLA model
         for param in self.frozen_pla.parameters():
@@ -110,21 +133,27 @@ class AdaptedPLA(nn.Module):
             dropout=adapter_dropout,
         )
         
-        # Create reconstruction MLP (trainable)
+        # Create reconstruction MLP (trainable) - takes adapted latent action + background one-hot
         self.reconstruction_mlp = ReconstructionMLP(
             input_dim=latent_action_dim,
             hidden_dim=reconstruction_hidden_dim,
             num_layers=reconstruction_num_layers,
             dropout=reconstruction_dropout,
+            num_backgrounds=num_backgrounds,
         )
         
         # Expose properties from frozen PLA for compatibility
         self.latent_act_dim = latent_action_dim
         self.final_encoder_shape = frozen_pla.final_encoder_shape
         
-    def forward(self, obs, next_obs):
+    def forward(self, obs, next_obs, background_labels=None):
         """
         Forward pass through the adapted PLA.
+        
+        Args:
+            obs: Current observation tensor
+            next_obs: Next observation tensor
+            background_labels: Background label indices [batch_size] (will be one-hot encoded)
         
         Returns:
             latent_next_obs: Output of the frozen obs_head (using adapted latent action)
@@ -142,8 +171,13 @@ class AdaptedPLA(nn.Module):
         # Pass through adapter MLP (trainable)
         adapted_latent_action = self.adapter_mlp(original_latent_action)
         
-        # Reconstruct original latent action from adapted version
-        reconstructed_latent_action = self.reconstruction_mlp(adapted_latent_action)
+        # Create one-hot encoding for background labels if provided
+        background_onehot = None
+        if self.num_backgrounds > 0 and background_labels is not None:
+            background_onehot = F.one_hot(background_labels, num_classes=self.num_backgrounds).float()
+        
+        # Reconstruct original latent action from adapted version + background info
+        reconstructed_latent_action = self.reconstruction_mlp(adapted_latent_action, background_onehot)
         
         # Use frozen obs_head with adapted latent action
         with torch.no_grad():
@@ -174,6 +208,7 @@ class AdaptedPLA(nn.Module):
                 "adapter_config": {
                     "adapter_hidden_dim": self.adapter_mlp.mlp[0].out_features if hasattr(self.adapter_mlp.mlp[0], 'out_features') else self.latent_act_dim,
                     "reconstruction_hidden_dim": self.reconstruction_mlp.mlp[0].out_features if hasattr(self.reconstruction_mlp.mlp[0], 'out_features') else self.latent_act_dim,
+                    "num_backgrounds": self.num_backgrounds,
                 },
             },
             path,
@@ -193,7 +228,7 @@ class PLAConfig:
     # Dataset config
     data_path: str = ''
     future_obs_offset: int = 1
-    frame_stack: int = 3
+    frame_stack: int = 1
     normalize: bool = True
     custom_dataset: bool = False
     
@@ -203,7 +238,7 @@ class PLAConfig:
     # Discriminator config
     discriminator_dim: int = 512
     num_discriminator_outputs: int = 12
-    alignment_method: str = 'discriminator'
+    alignment_method: str = 'l1'
     
     # Adapter MLP config
     adapter_hidden_dim: int = 512
@@ -259,6 +294,9 @@ def fine_tune_pla(pla: nn.Module, config: PLAConfig):
         collate_fn=td_collate_fn,
     )
 
+    # Get number of backgrounds from dataset for reconstruction MLP conditioning
+    num_backgrounds = dataset.get_num_discriminator_outputs()
+    
     # Wrap the frozen PLA with adapter and reconstruction MLPs
     adapted_pla = AdaptedPLA(
         frozen_pla=pla,
@@ -268,12 +306,14 @@ def fine_tune_pla(pla: nn.Module, config: PLAConfig):
         reconstruction_hidden_dim=config.reconstruction_hidden_dim,
         reconstruction_num_layers=config.reconstruction_num_layers,
         reconstruction_dropout=config.reconstruction_dropout,
+        num_backgrounds=num_backgrounds,
     ).to(DEVICE)
 
     print("\n=== AdaptedPLA Architecture ===")
     print(f"Frozen PLA latent action dim: {adapted_pla.latent_act_dim}")
+    print(f"Number of backgrounds: {num_backgrounds}")
     print(f"Adapter MLP: {adapted_pla.adapter_mlp}")
-    print(f"Reconstruction MLP: {adapted_pla.reconstruction_mlp}")
+    print(f"Reconstruction MLP (input: latent_action + background_onehot): {adapted_pla.reconstruction_mlp}")
     print(f"Trainable parameters: {sum(p.numel() for p in adapted_pla.get_trainable_parameters())}")
     print(f"Frozen parameters: {sum(p.numel() for p in adapted_pla.frozen_pla.parameters())}")
     print("=" * 30 + "\n")
@@ -324,9 +364,9 @@ def fine_tune_pla(pla: nn.Module, config: PLAConfig):
             state_diffs = batch["state_diff"]
             background_labels = batch.get("background_labels", None)
 
-            # Forward pass through adapted PLA
+            # Forward pass through adapted PLA (pass background labels for reconstruction conditioning)
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
-                latent_next_obs, adapted_latent_action, obs_hidden, original_latent_action, reconstructed_latent_action = adapted_pla(obs, future_obs)
+                latent_next_obs, adapted_latent_action, obs_hidden, original_latent_action, reconstructed_latent_action = adapted_pla(obs, future_obs, background_labels)
 
                 # Reconstruction loss: adapted_latent_action should be reconstructible back to original
                 reconstruction_loss = F.mse_loss(reconstructed_latent_action, original_latent_action.detach())
@@ -336,12 +376,14 @@ def fine_tune_pla(pla: nn.Module, config: PLAConfig):
                     alignment_loss = F.cross_entropy(discriminator_logits, background_labels)
                 elif config.alignment_method == 'contrastive':
                     import pdb; pdb.set_trace()
+                elif config.alignment_method == 'l1':
+                    alignment_loss = torch.norm(adapted_latent_action, p=1, dim=-1).mean()
                 else:
                     alignment_loss = torch.tensor(0.0, device=DEVICE)
                 
                 # Total loss: alignment loss + reconstruction loss
                 # Note: alignment_loss is negated because we want to maximize entropy/confusion
-                loss = -alignment_loss + config.reconstruction_loss_coef * reconstruction_loss
+                loss = alignment_loss + config.reconstruction_loss_coef * reconstruction_loss
 
             optim.zero_grad(set_to_none=True)
             loss.backward()

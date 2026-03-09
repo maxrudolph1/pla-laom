@@ -55,7 +55,7 @@ class PLAConfig:
     encoder_deep: bool = True
     target_tau: float = 0.01
     target_update_every: int = 1
-    frame_stack: int = 3
+    frame_stack: int = 1
     normalize: bool = True
     custom_dataset: bool = False
     has_policy_labels: bool = False
@@ -63,11 +63,11 @@ class PLAConfig:
     state_difference_probe: bool = False
     discriminator_dim: int = 512
     num_discriminator_outputs: int = 12
-    discriminator_weight: float = 1.0
+    discriminator_weight: float = 0.0
     data_path: str = ''
     la_regularization: str = ''
     state_regularization: str = ''
-    behavior_loss_coef: float = 0.1
+    behavior_loss_coef: float = 0.0
     alignment_method: str = 'discriminator'
     
 
@@ -512,13 +512,12 @@ if __name__ == "__main__":
 # Parameters
 #SBATCH --account=amyzhang
 #SBATCH --cpus-per-task=16
-#SBATCH --error=slurm_scripts/job_%j/err.err
-#SBATCH --output=slurm_scripts/job_%j/out.out
-#SBATCH --job-name=pla-fine-tune
+#SBATCH --error=slurm_jobs/job_%j/err.err
+#SBATCH --output=slurm_jobs/job_%j/out.out
+#SBATCH --job-name=pla-pretrain
 #SBATCH --mem=128GB
 #SBATCH --gres=gpu:1
 #SBATCH --partition=allnodes
-#SBATCH --exclude=slurm-node-008
 #SBATCH --time=6:00:00
 
 source /u/mrudolph/miniconda3/etc/profile.d/conda.sh
@@ -527,7 +526,7 @@ python """ + " ".join(sys.argv) + """
 """
         import subprocess
 
-        path = "slurm_scripts/temp_submission.slurm"  # You may want to modify this value or get it from config
+        path = "slurm_jobs/temp_submission.slurm"  # You may want to modify this value or get it from config
 
         # Open file and append a line
         with open(path, "w") as f:
@@ -539,8 +538,8 @@ python """ + " ".join(sys.argv) + """
         print("sbatch output:", jid)
         print("sbatch error:", result.stderr)
         import os
-        os.makedirs(f"slurm_scripts/job_{jid}", exist_ok=True)
-        with open(f"slurm_scripts/job_{jid}/submission.sh", "w") as f:
+        os.makedirs(f"slurm_jobs/job_{jid}", exist_ok=True)
+        with open(f"slurm_jobs/job_{jid}/submission.sh", "w") as f:
             f.write(TEMPLATE)
     else:
 

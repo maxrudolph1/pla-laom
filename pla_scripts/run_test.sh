@@ -10,4 +10,3 @@ python train_pla.py \
     --pla.num_epochs=300 \
     --fine_tune=False \
     --pretrain=True \
-    # --ckpt_path=artifacts/distracting-backgrounds/base-pla-model-dfa24071-5702-487e-bd2a-e27dc58858d6/lapo.pth

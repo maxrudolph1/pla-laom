@@ -100,12 +100,12 @@ class DCSLAOMInMemoryDataset(Dataset):
             else:
                 unique_episodes = np.unique(df['episode_index'][:])
                 episode_index = df['episode_index'][:]
-                self.observations = [torch.tensor(df['frames'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
-                self.actions = [torch.tensor(df['action'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
-                self.states = [torch.tensor(df['state'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
+                self.observations = [torch.tensor(df['frames'][episode_index == ep]).float().squeeze() for ep in unique_episodes]
+                self.actions = [torch.tensor(df['action'][episode_index == ep]).float().squeeze() for ep in unique_episodes]
+                self.states = [torch.tensor(df['state'][episode_index == ep]).float().squeeze() for ep in unique_episodes]
                 self.state_diffs = [torch.diff(state, dim=-2) for state in self.states]
                 self.img_hw = 84 #[84, 84] #df.attrs["img_hw"] # this is a np.int32(64) in the hdf5 file
-                self.background_labels = [torch.tensor(df['background_id'][episode_index == ep], device=device).float().squeeze() for ep in unique_episodes]
+                self.background_labels = [torch.tensor(df['background_id'][episode_index == ep]).float().squeeze() for ep in unique_episodes]
             self.act_dim = self.actions[0][0].shape[-1]
             self.state_dim = self.states[0][0].shape[-1]
         
